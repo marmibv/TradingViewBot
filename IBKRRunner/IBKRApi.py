@@ -349,7 +349,17 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.nextValidOrderId += 1
 		return retval
 
-	async def PlaceMarketOptionOrder(self, optionOrder:OptionOrder, close: float):
+	async def SellMarketOptionOrder(self, symbol, right, strike, expiry, quantity):
+		mktContract = self._createOptionContract(symbol, right, strike, expiry)
+		mktOrder = self._createMarketOrder('sell', quantity)
+		status = self.placeOrder(self.nextValidOrderId, mktContract, mktOrder)
+		oo = OptionOrder(symbol, right, 'sell', expiry, strike, 0)
+		oo.quantity = quantity
+		self.orders[self.nextValidOrderId] = oo
+		self.nextValidOrderId += 1
+		return status
+
+	async def BuyMarketOptionOrder(self, optionOrder:OptionOrder, close: float):
 		self._authenticated.wait()
 		retval = None
 		contracts = await self.GetCurrentOptionPrices_Atm_Closest(optionOrder.symbol, optionOrder.right, close)
@@ -361,11 +371,18 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 				status = self.placeOrder(self.nextValidOrderId, mktContract, mktOrder)
 				self.orders[self.nextValidOrderId] = optionOrder
 				self.nextValidOrderId += 1
-				retval = 'order placed'
-				break
+				optionOrder.status = 'success'
+				optionOrder.quantity = quantity
+				optionOrder.price = contract.price
+				retval = optionOrder
 			else:
-				retval = f'insufficient funds for {contract.symbol} {contract.strike} {contract.lastTradeDateOrContractMonth} {contract.price}'
-				logger.error(retval)
+				optionOrder.status = 'insufficient funds'
+				optionOrder.quantity = 0
+				optionOrder.price = contract.price
+				logger.error(optionOrder)
 		else:
-			retval = 'no options found'
-		return retval
+			optionOrder.status = 'no options found'
+			optionOrder.quantity = 0
+			optionOrder.price = None
+			logger.error(optionOrder)
+		return optionOrder
