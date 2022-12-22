@@ -1,0 +1,2 @@
+class TradeBotRunnerRestartException(Exception):
+	pass

@@ -1,0 +1,8 @@
+{
+	"ticker": "BNBUSDT",
+	"type": "option",
+	"right": "call",
+	"side": "buy",
+	"time": "HHHH:MM:SS",
+	"reason": "VWAP Wick Up"
+}
