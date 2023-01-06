@@ -51,14 +51,14 @@ class OptionContract:
 # String representation of an option:
 # QQQ-CALL-345-2022.10.21
 class OptionOrder:
-	def __init__(self, symbol: str, right: str, side: str, expiry: str, strike: str, allocation: float) -> None:
+	def __init__(self, symbol: str, right: str, side: str, expiry: str, strike: str, allocation: float, quantity: float = 0) -> None:
 		self.symbol = symbol
 		self.right = right
 		self.side = side
-		self.quantity = 0
+		self.quantity = quantity
+		self.allocation = allocation
 		self.expiry = expiry
 		self.strike = strike
-		self.allocation = allocation
 		self._id = uuid4().hex
 		self.startTime = time.time()
 		self.endTime = None  # set this before logging completed trade

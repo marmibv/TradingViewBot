@@ -28,6 +28,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.evTickPrice = threading.Event()
 		self.task = None
 		self.marketDataRequestId = 1
+		self.tickInfo = {}
 
 	def GetAsyncCoroutine(self):
 		return self.task
@@ -46,7 +47,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 
 	async def Connect(self):
 		logger.debug('Connecting to IBKR streaming...')
-		self.connect(self.url, 7497, int(random()*10000))
+		self.connect(self.url, 7496, int(random()*10000))
 		logger.debug('Connected to IBKR streaming.')
 		await self._authenticate()
 
@@ -106,24 +107,53 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			  "PermId:", permId, "ParentId:", parentId, "LastFillPrice:", lastFillPrice, "ClientId:", clientId, "WhyHeld:", whyHeld, "MktCapPrice:", mktCapPrice)
 		if orderId in self.orders:
 			ibkrOrder = self.orders[orderId]
-			symbol = ibkrOrder.contract.localSymbol[:3] + '-' + ibkrOrder.contract.localSymbol[4:]
-			if symbol in self.subscribers:
-				subscriber = self.subscribers[symbol]
+			if ibkrOrder.contract:
+				symbol = ibkrOrder.contract.localSymbol[:3] + '-' + ibkrOrder.contract.localSymbol[4:]
 				if filled >= ibkrOrder.totalQuantity:
-					os = OrderStatus(symbol, float(filled), ibkrOrder.action, float(avgFillPrice), status='filled')
-					subscriber(os)
+					self.lastOrder = OrderStatus(symbol, float(filled), ibkrOrder.action, float(avgFillPrice), orderId, status='filled')
+					self._orderEvent.set()
+					if symbol in self.subscribers:
+						subscriber = self.subscribers[symbol]
+						subscriber(self.lastOrder)
 		# TODO else conditions?
 		# TODO Handle cancel order, failed order, all the things that can go wrong
 
-	def tickPrice(self, reqId: TickerId, tickType, price: float, attrib: TickAttrib):
-		self.tickInfo = {
-			'reqId': reqId,
-			'tickType': tickType,
-			'price': price,
-			'attrib': attrib
+	def tickPrice(self, reqId: TickerId, tickId: int, price: float, attrib: TickAttrib):
+		# Field definitions:
+		# 1 - Bid Price
+		# 2 - Ask Price
+		# 4 - Last Price
+		# 6 - High of day
+		# 7 - Low of day
+		# 9 - Close of last day
+		tickIdLookup = {
+			'1': 'bid',
+			'2': 'ask',
+			'4': 'last',
+			'6': 'hod',
+			'7': 'lod',
+			'9': 'close'
 		}
-		self.evTickPrice.set()
-		return super().tickPrice(reqId, tickType, price, attrib)
+		# For most things we care only about the ask
+		requestId = f'{reqId}'
+		tickId = f'{tickId}'
+		if tickId in tickIdLookup:
+			if requestId not in self.tickInfo:
+				self.tickInfo[requestId] = {}
+			req = self.tickInfo[requestId]
+			tickType = tickIdLookup[tickId]
+			req[tickType] = price
+			tickInfo = {
+				'reqId': reqId,
+				'tickType': tickId,
+				'price': price,
+				'attrib': attrib
+			}
+			logger.debug(tickInfo)
+			# The ticks come in order, any of these indicate that we have enough information to proceed
+			if tickType == 'last' or tickType == 'close' or tickType == 'hod' or tickType == 'lod':
+				self.evTickPrice.set()
+		return super().tickPrice(reqId, tickId, price, attrib)
 
 	def position(self, account, contract: Contract, pos, avgCost):
 		pos = Position(contract.tradingClass, pos, avgCost, avgCost)
@@ -169,14 +199,10 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 
 	def GetOpenOrders(self):
 		self.reqAllOpenOrders()
+		# TODO
 		# Data will be returned in callbacks openOrder and orderStatus, need to make this an async
 		return None
 
-		# Return data expected as follows:
-		# orders = []
-		# for oo in oos:
-		# 	orders.append(Order(oo.symbol, oo.side, oo.type, oo.limit_price, oo.qty, oo.status, oo.client_order_id, nativeID=oo.id))
-		# return orders
 
 	def GetOpenOrderFor(self, symbol):
 		order = None
@@ -197,29 +223,6 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	async def GetCurrentPrice(self, symbol):
 		return 282
 
-	async def GetCurrentOptionPrice(self, symbol, right, strike, expiry):
-		contract = self._createOptionContract(symbol, right, strike, expiry)
-		self.reqMktData(self.marketDataRequestId,  contract, '', True, False, '')
-		self.marketDataRequestId += 1
-		if self.evTickPrice.wait(30):
-			self.evTickPrice.clear()
-			contract.price = self.tickInfo['price']
-		else:
-			# Timeout
-			pass
-		return contract
-
-	async def GetCurrentPrices(self, symbols):
-		prices = []
-		for symbol in symbols:
-			contract = self._createOptionContract(symbol, 'call', 282, '20221102')
-			self.reqMktData(self.marketDataRequestId,  contract, '', True)
-			self.marketDataRequestId += 1
-			self.evTickPrice.wait()
-			self.evTickPrice.clear()
-			prices[symbol] = self.tickInfo.price
-		return []
-
 	async def GetCurrentPositions(self):
 		self._authenticated.wait()
 		self.positions = []
@@ -229,61 +232,6 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			logger.exception("Failed to get current positions")
 		return self.positions
 
-	async def GetOptionContractDetails(self, symbol, right, strike, targetDay):
-		contracts = []
-		contractAtm = self._createOptionContract(symbol, right, strike, targetDay)
-		contractItm = self._createOptionContract(symbol, right, strike - 1, targetDay)
-
-		self.reqContractDetails(self.nextValidOrderId, contractItm)
-		self.evOptionContractDetails.wait()
-		self.evOptionContractDetails.clear()
-		if hasattr(self.optionContractDetails, 'ask'):
-			# TODO - create an optionOrder object from optionContractDetails
-			contracts.append(self.optionContractDetails.ask)
-
-		self.reqContractDetails(self.nextValidOrderId, contractAtm)
-		self.evOptionContractDetails.wait()
-		self.evOptionContractDetails.clear()
-		if hasattr(self.optionContractDetails, 'ask'):
-			# TODO - create an optionOrder object from optionContractDetails
-			contracts.append(self.optionContractDetails.ask)
-		return contracts
-
-	async def GetCurrentOptionPrices_Atm_Closest(self, symbol, right, close):
-		contracts = []
-		self._authenticated.wait()
-		today = datetime.now()
-		dayOfWeek = today.weekday() #0 = Monday, 6 = Sunday
-		hourOfDay = today.hour # What time zone is this in?  Local?
-		# QQQ, SPY has options on days 0, 1, 2, 3, 4 (M, T, W, Th, F)
-		# Other tickers usually day 4 (F)
-		targetDay = today
-		if (symbol == 'QQQ' or symbol == 'SPY') and dayOfWeek < 4:
-			if hourOfDay > 10: # If after 10am on 0DTE contracts, go to next contract
-				targetDay = today + timedelta(days = 1)
-		elif dayOfWeek == 0:
-			targetDay = today + timedelta(days = 4)
-		elif dayOfWeek == 1:
-			targetDay = today + timedelta(days=3)
-		elif dayOfWeek == 2:
-			targetDay = today + timedelta(days=2)
-		elif dayOfWeek == 3:
-			targetDay = today + timedelta(days=1)
-		elif dayOfWeek == 4:
-			if hourOfDay > 10: # If after 10am on Friday (0DTE), go to monday's contract
-				targetDay = today + timedelta(days = 3)
-		elif dayOfWeek == 5: # Saturday - go to monday
-			targetDay = today + timedelta(days = 2)
-		elif dayOfWeek == 6: # Sunday - go to monday
-			targetDay = today + timedelta(days = 1)
-   
-		strike = trunc(close)
-		itmContract = await self.GetCurrentOptionPrice(symbol, right, strike, targetDay)
-		atmContract = await self.GetCurrentOptionPrice(symbol, right, strike - 1 if right == 'call' else strike + 1, targetDay)
-		contracts.append(itmContract)
-		contracts.append(atmContract)
-
-		return contracts
 
 	def GetCurrentPositionFor(self, symbol):
 		self._authenticated.wait()
@@ -303,7 +251,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		contract.currency = 'USD'
 		contract.lastTradeDateOrContractMonth = date if type(date) is str else date.strftime("%Y%m%d")
 		contract.strike = strike
-		contract.right = 'C' if right == 'call' else 'P'
+		contract.right = 'C' if (right.upper() == 'CALL') else 'P'
 		return contract
 
 	#Function to create FX Order contract
@@ -327,6 +275,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.totalQuantity = qty
 		order.orderType = 'LMT' if kind == 'limit' else 'MKT'
 		order.lmtPrice = price
+		order.outsideRth = True
 		return order
 
 	def _createMarketOrder(self, action, qty):
@@ -339,6 +288,18 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.firmQuoteOnly = False
 		return order
 
+	def _createLimitOrder(self, action, qty, limit):
+		# Create order object
+		order = Order()
+		order.action = action.upper()
+		order.totalQuantity = qty
+		order.orderType = 'LMT'
+		order.lmtPrice = limit
+		order.eTradeOnly = False
+		order.firmQuoteOnly = False
+		order.outsideRth = True
+		return order
+
 	def PlaceStockOrder(self, oo):
 		self._authenticated.wait()
 		retval = None
@@ -349,40 +310,196 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.nextValidOrderId += 1
 		return retval
 
-	async def SellMarketOptionOrder(self, symbol, right, strike, expiry, quantity):
+	async def SellOptionsAtMarket(self, symbol, right, strike, expiry, quantity):
+		retval = None
 		mktContract = self._createOptionContract(symbol, right, strike, expiry)
-		mktOrder = self._createMarketOrder('sell', quantity)
-		status = self.placeOrder(self.nextValidOrderId, mktContract, mktOrder)
+		if self.AfterHours():
+			contract = await self.GetCurrentOptionPrice(symbol, right, strike, expiry)
+			limit = (contract.bidPrice + contract.askPrice) / 2
+			order = self._createLimitOrder('sell', quantity, limit)
+		else:
+			order = self._createMarketOrder('sell', quantity)
 		oo = OptionOrder(symbol, right, 'sell', expiry, strike, 0)
 		oo.quantity = quantity
 		self.orders[self.nextValidOrderId] = oo
 		self.nextValidOrderId += 1
-		return status
-
-	async def BuyMarketOptionOrder(self, optionOrder:OptionOrder, close: float):
-		self._authenticated.wait()
-		retval = None
-		contracts = await self.GetCurrentOptionPrices_Atm_Closest(optionOrder.symbol, optionOrder.right, close)
-		for contract in contracts:
-			quantity = trunc(optionOrder.allocation / (contract.price * 100))
-			if quantity > 0:
-				mktContract = self._createOptionContract(optionOrder.symbol, optionOrder.right, contract.strike, contract.lastTradeDateOrContractMonth)
-				mktOrder = self._createMarketOrder(optionOrder.side, quantity)
-				status = self.placeOrder(self.nextValidOrderId, mktContract, mktOrder)
-				self.orders[self.nextValidOrderId] = optionOrder
-				self.nextValidOrderId += 1
-				optionOrder.status = 'success'
-				optionOrder.quantity = quantity
-				optionOrder.price = contract.price
-				retval = optionOrder
-			else:
-				optionOrder.status = 'insufficient funds'
-				optionOrder.quantity = 0
-				optionOrder.price = contract.price
-				logger.error(optionOrder)
+		self.placeOrder(self.nextValidOrderId, mktContract, order)
+		if self._orderEvent.wait(30):
+			self._orderEvent.clear()
+			oo.price = self.lastOrder.price
+			oo.status = 'success'
+			retval = oo
 		else:
-			optionOrder.status = 'no options found'
-			optionOrder.quantity = 0
-			optionOrder.price = None
-			logger.error(optionOrder)
-		return optionOrder
+			logger.error(f'Unable to place order {oo}')
+		return retval
+
+	def AfterHours(self):
+		now = datetime.now()	# TODO - figure out time zones for this thing, perhaps by ticker Local time, PST
+		afterHours =  now.hour > 16 or now.hour < 9 or (now.hour == 9 and now.minute >= 30)
+		return afterHours
+
+	async def BuyAtmOptionsAtMarket(self, symbol, right, close, allocation):
+		retval = None
+		self._authenticated.wait()
+		contracts = await self.GetOptionContractsAtmClosest(symbol, right, close)
+		for contract in contracts:
+			quantity = trunc(allocation / (contract.price * 100))
+			oo = OptionOrder(symbol, right, 'BUY', contract.lastTradeDateOrContractMonth, contract.strike, allocation, quantity=quantity)
+			if quantity > 0:
+				self.orders[self.nextValidOrderId] = oo
+				self.nextValidOrderId += 1
+				order = None
+				timeout = None
+				if self.AfterHours():
+					order = self._createLimitOrder('BUY', quantity, contract.askPrice)
+					timeout = 240
+				else:
+					order = self._createMarketOrder('BUY', quantity)
+					timeout = 120	 # Wait 2 minutes for a market buy
+				self.placeOrder(self.nextValidOrderId, contract, order)
+				if self._orderEvent.wait(timeout):
+					self._orderEvent.clear()
+					oo.status = 'success'
+					oo.quantity = quantity
+					oo.price = self.lastOrder.price
+					oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
+					retval = oo
+				else:
+					logger.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
+				# We've placed an order, get out of loop
+				break
+			else:
+				oo.status = 'insufficient funds'
+				oo.quantity = 0
+				oo.price = contract.price
+				logger.error(oo)
+		else:
+			oo = OptionOrder(symbol, right, 'BUY', None, None, allocation, quantity=0)
+			oo.status = 'no options found'
+			oo.price = None
+			logger.error(oo)
+		return retval
+
+	def _roundTo(self, x, minIncrement):
+		return int(minIncrement * trunc(float(x) / minIncrement))
+
+	# Get a few options contracts ATM or ITM and closest expiry available
+	# Return them in nearest strike and expiry order
+	async def GetOptionContractsAtmClosest(self, symbol, right, close):
+		contracts = []
+		self._authenticated.wait()
+		today = datetime.now()
+		dayOfWeek = today.weekday()  # 0 = Monday, 6 = Sunday
+		hourOfDay = today.hour  # What time zone is this in?  Local?
+		# QQQ, SPY has options on days 0, 1, 2, 3, 4 (M, T, W, Th, F)
+		# Other tickers usually day 4 (F)
+		optionsSymbols = {
+			'default': {'optionTick': 1, 'hasDailies': False, 'hasWeeklies': True},
+			'QQQ': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True},
+			'SPY': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True},
+			'SPX': {'optionTick': 5, 'hasDailies': True, 'hasWeeklies': True},
+			'XSP': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True},
+			'NANOS': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True},
+			'NDX': {'optionTick': 5, 'hasDailies': True, 'hasWeeklies': True},
+			'XND': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True}
+		}
+		targetDay = today
+		optionsConfig = optionsSymbols[symbol] if symbol in optionsSymbols else optionsSymbols['default']
+		if (optionsConfig['hasDailies']):
+			# TODO Get time zone to be time zone of exchange for ticker, too much craziness with local/exchange times
+			if hourOfDay >= 11:  # If after 1pm on 0DTE contracts, go to next contract just in case we have to hold to next day for algo
+				if dayOfWeek == 4:
+					targetDay = today + timedelta(days=3)
+				elif dayOfWeek == 5:  # Saturday - go to monday
+					targetDay = today + timedelta(days=2)
+				elif dayOfWeek == 6:  # Sunday - go to monday
+					targetDay = today + timedelta(days=1)
+				else:
+					targetDay = today + timedelta(days=1)
+			else:
+				targetDay = today
+		elif (optionsConfig['hasWeeklies']):
+			if dayOfWeek == 0:
+				targetDay = today + timedelta(days=4)
+			elif dayOfWeek == 1:
+				targetDay = today + timedelta(days=3)
+			elif dayOfWeek == 2:
+				targetDay = today + timedelta(days=2)
+			elif dayOfWeek == 3:
+				targetDay = today + timedelta(days=1)
+			elif dayOfWeek == 4:
+				if hourOfDay > 10:  # If after 10am on Friday (0DTE), go to monday's contract
+					targetDay = today + timedelta(days=3)
+			elif dayOfWeek == 5:  # Saturday - go to monday
+				targetDay = today + timedelta(days=2)
+			elif dayOfWeek == 6:  # Sunday - go to monday
+				targetDay = today + timedelta(days=1)
+		else: # Monthlies only
+			logger.debug('No weekly options avail, no trade')
+
+		strikeIncrement = optionsConfig['optionTick']
+		strike = self._roundTo(close, strikeIncrement)
+
+		# TODO - pull a few strikes, find the first one (up or down) that doesn't have a crazy spread, and has some bid/ask sizes
+		# sometimes we get raped on options that have a $1 or more spread.
+		# Or maybe just switch to 1DTE sometime around 2pm - that's when the 0DTEs seem to dry up.
+		# Go first strike OTM, not ATM, the ATM and better options have crazy spreads on SPX/XSP close to end of day.
+		strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
+		atmContract = await self.GetCurrentOptionPrice(symbol, right, strike, targetDay)
+		otmContract = await self.GetCurrentOptionPrice(symbol, right, strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement, targetDay)
+		contracts.append(atmContract)
+		contracts.append(otmContract)
+		return contracts
+
+	async def GetCurrentOptionPrice(self, symbol, right, strike, expiry):
+		contract = self._createOptionContract(symbol, right, strike, expiry)
+		self.evTickPrice.clear()
+		self.reqMktData(self.marketDataRequestId,  contract, '', True, False, '')
+		reqId = f'{self.marketDataRequestId}'
+		self.marketDataRequestId += 1
+		waitingForTickInfo = True
+		while waitingForTickInfo:
+			if self.evTickPrice.wait(5):
+				self.evTickPrice.clear()
+				if reqId in self.tickInfo:
+					tickInfo = self.tickInfo[reqId]
+					contract.askPrice = tickInfo['ask'] if 'ask' in tickInfo else contract.askPrice if hasattr(contract, 'askPrice') else None
+					contract.bidPrice = tickInfo['bid'] if 'bid' in tickInfo else contract.bidPrice if hasattr(contract, 'bidPrice') else None
+					contract.lastPrice = tickInfo['last'] if 'last' in tickInfo else contract.lastPrice if hasattr(contract, 'lastPrice') else None
+					if 'last' in tickInfo:
+						contract.price = tickInfo['last']
+						waitingForTickInfo = False
+					elif 'ask' and 'bid' in tickInfo:
+						contract.price = (tickInfo['ask'] + tickInfo['bid']) / 2
+					elif 'ask' in tickInfo:
+						contract.price = tickInfo['ask']
+					elif 'bid' in tickInfo:
+						contract.price = tickInfo['bid']
+					else:
+						# Got no useful price info, force 0 quantity by listing huge premium
+						contract.price = 9999999999
+			else:
+				# Timeout - probably bad ticker ID
+				waitingForTickInfo = False
+		# TODO Grab min tick setting and do this right
+		contract.price = round(contract.price, 2)
+		return contract
+
+	async def GetOptionContractDetails(self, symbol, right, strike, targetDay):
+		contracts = []
+		right = right.upper()
+		contractAtm = self._createOptionContract(symbol, right, strike, targetDay)
+		contractItm = self._createOptionContract(symbol, right, strike - 1, targetDay)
+
+		self.reqContractDetails(self.nextValidOrderId, contractItm)
+		self.evOptionContractDetails.wait()
+		self.evOptionContractDetails.clear()
+		if hasattr(self.optionContractDetails, 'ask'):
+			contracts.append(self.optionContractDetails.ask)
+
+		self.reqContractDetails(self.nextValidOrderId, contractAtm)
+		self.evOptionContractDetails.wait()
+		self.evOptionContractDetails.clear()
+		if hasattr(self.optionContractDetails, 'ask'):
+			contracts.append(self.optionContractDetails.ask)
+		return contracts

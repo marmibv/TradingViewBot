@@ -31,6 +31,10 @@ client = pymongo.MongoClient("mongodb://localhost:27017")
 algoBotDb = client['AlgoBot']
 signalsDoc = algoBotDb['TVSignals']
 
+symbolLookup = {
+	'BNBUSDT': 'BNB-USDT'
+}
+
 def makeAlgoSignalKey(algoId, symbol, timeframe):
 	return f'{algoId}:{symbol}:{timeframe}'
 
@@ -42,21 +46,25 @@ def LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, close, t
 @app.route("/webhook", methods=['POST'])
 def webhook():
 	postMsg = json.loads(request.data)
+	log.oper(f'Received webhook msg: {postMsg}')
 	# What are we doing?
 	# Parse out the message and log it in the signals database
 	if postMsg['phrase'] == 'CrispyBlueDuck':
-		algoId = postMsg['algo']
+		algoId = postMsg['algo'].upper()
 		symbol = postMsg['ticker']
 		timeframe = postMsg['timeframe']
-		type = postMsg['type'] # option, stock, future etc...
-		side = postMsg['side']
-		right = postMsg['right']
+		type = postMsg['type'].upper() # option, stock, future etc...
+		side = postMsg['side'].upper()
+		right = postMsg['right'].upper()
 		signal = postMsg['reason']
 		price = postMsg['close']
 		tier = 1
 		ts = postMsg['time']
+  
+		symbol = symbolLookup[symbol] if symbol in symbolLookup else symbol
 
 		LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, price, tier, ts)
+		log.oper(f'Logging signal {algoId}:{symbol}:{timeframe}:{type}:{side}:{right}:{signal}:{price}:{tier}:{ts}')
 		print(postMsg)
 		return {
 			'code': 200,

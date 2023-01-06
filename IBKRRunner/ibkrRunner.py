@@ -31,9 +31,6 @@ lroot.addHandler(handler)
 log = logging.getLogger('MAIN')
 log.setLevel(logging.DEBUG)
 
-# connect to Interactive Brokers
-ib = IB()
-ib.connect('127.0.0.1', 7497, clientId=1)
 
 dbClient = AsyncMongoClient.AsyncIOMotorClient("mongodb://localhost:27017")
 algoBotDb = dbClient['AlgoBot']
@@ -43,9 +40,18 @@ ordersTbl = tradeDb['OrderAudit']
 positionsTbl = tradeDb['Positions']
 positionsAuditTbl = tradeDb['PositionsAudit']
 tradesTbl = tradeDb['Trades']
+tradedSymbolsTbl = tradeDb['TradedSymbols']
 
 ibkrApi:IBKRTradeApi = None
 
+def MakePositionIdFromOption(algoId, symbol, timeframe, type, right, strike, expiry):
+	optionTicker = f'{algoId}:{symbol}:{timeframe}:{type}:{right}:{strike}:{expiry}'
+	return optionTicker
+
+def onOrderUpdate(os):
+	# OrderStatus(symbol, float(filled), ibkrOrder.action, float(avgFillPrice), status='filled')
+	tradesTbl
+	
 # Sample data returned from trade signal
 # {
 # 	"phrase": "CrispyBlueDuck",
@@ -63,25 +69,83 @@ ibkrApi:IBKRTradeApi = None
 async def onTradeSignal(signal):
       # What are we doing?
 	symbol = signal['symbol']
-	right = signal['right']
-	side = signal['side']
+	algoId = signal['algoId'].upper()
+	timeframe = f'{signal["timeframe"]}m'
+	type = signal['type'].upper()
+	right = signal['right'].upper()
+	side = signal['side'].upper()
 	close = signal['close']
 
-	await ordersTbl.insert_one(optionOrder.__dict__)
-	if side == 'buy':
-		optionOrder = OptionOrder(symbol, right, side, datetime.now(), math.trunc(close), config.allocation)
-		order = await ibkrApi.BuyMarketOptionOrder(optionOrder, close)
-		await positionsTbl.insert_one(optionOrder.__dict__)
-		await positionsAuditTbl.insert_one(optionOrder.__dict__)
+	tradedSymbolDef = await tradedSymbolsTbl.find_one({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type})
+	if (tradedSymbolDef):
+		allocation = tradedSymbolDef['allocation']
+		if side == 'BUY':
+			# BuyMarket... is blocking but async, we have full info after it returns
+			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, close, allocation)
+			if order and order.status == 'success':
+				# Order has completed, let's record the order sepcifics from IBKR, then update our cash and positions
+				oo = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, order.quantity)
+				await ordersTbl.insert_one(oo.__dict__)
 
-	elif side == 'sell':
-		position = positionsTbl.find_one({'symbol': symbol, 'right': right, 'side': 'buy'})
-		if position:
-			status = await ibkrApi.SellMarketOptionOrder(position['symbol'], position['right'], position['strike'], position['exipiry'], position['quantity'])
-			oo = OptionOrder(symbol, right, side, position['expiry'], position['strike'], 0)
-			oo. quantity = position['quantity']
-			await positionsAuditTbl.insert_one(oo.__dict__)
-			await positionsTbl.delete_one({'symbol': symbol, 'right': right, 'side': 'buy'})
+				# Record the position change to the audit log
+				positionId = MakePositionIdFromOption(algoId, symbol, timeframe, type, right, order.strike, order.expiry)
+				positionFields = {'algoId': algoId, 'timeframe': timeframe, 'symbol': symbol, 'type': type, 'right': right, 'strike': order.strike, 'expiry': order.expiry, 'quantity': order.quantity}
+				auditPositionFields = positionFields.copy()
+				auditPositionFields['id'] = positionId
+				await positionsAuditTbl.insert_one(auditPositionFields)
+	
+				# Record the new or updated position
+				positionFields['_id'] = positionId
+				existingPosition = await positionsTbl.find_one({'_id': positionId})
+				if existingPosition:
+					newQuantity = existingPosition['quantity'] + order.quantity
+					await positionsTbl.update_one({'_id': positionId}, {'$set': {'quantity': newQuantity, 'expiry': order.expiry, 'strike': order.strike}})
+				else:
+					await positionsTbl.insert_one(positionFields)
+	
+				# Record the current cash allocation for this algo instance
+				allocation -= (order.quantity * order.price * 100)
+				await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': allocation}})
+			else:
+				log.error(f'Failed to execute buy order for {symbol}:{right}')
+
+		elif side == 'SELL':
+			# Sell all positions for this symbol, algo, timegrame, type and right (if option)
+			# There may have been different strikes/expiries opened and perhaps not closed due to order issues, clean them all up since
+			# we're getting a signal to sell.
+			async for position in positionsTbl.find({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type, 'right': right}):
+				if position and 'symbol' in position:
+					symbol = position['symbol']; algoId = position['algoId']; timeframe = position["timeframe"]; type = position['type']
+					right = position['right']; strike = position['strike']; expiry = position['expiry']; quantity = position['quantity']
+					if (quantity > 0):
+						# SellMarket is blocking but async, so we will have all order info on return
+						order = await ibkrApi.SellOptionsAtMarket(symbol, right, strike, expiry, quantity)
+						if order and order.status == 'success':
+							# Order has completed, let's log the order, then update our cash and positions
+							optionOrder = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, quantity=order.quantity)
+							await ordersTbl.insert_one(optionOrder.__dict__)
+		
+							# Log the position change to the audit table
+							positionId = MakePositionIdFromOption(algoId, symbol, timeframe, type, right, strike, expiry)
+							positionFields = {'algoId': algoId, 'timeframe': timeframe, 'symbol': symbol, 'type': type, 'right': right, 'strike': order.strike, 'expiry': order.expiry, 'quantity': order.quantity}
+							auditPositionFields = positionFields.copy()
+							auditPositionFields['id'] = positionId
+							positionsAuditTbl.insert_one(auditPositionFields)
+		
+							# Update quantity for this position definition
+							await positionsTbl.update_one({'_id': positionId}, {'$set': {'quantity': 0}})
+		
+							# Update allocation available
+							cashProceeds = order.quantity * order.price * 100
+							await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': round(allocation + cashProceeds, 2)}})
+						else:
+							log.error(f'Failed to execute sell order for {symbol}:{right}')
+					else:
+						log.error(f'Received sell signal for position with zero quantity {symbol}:{right}')
+				else:
+					log.error(f'Unable to find position for {symbol}:{right}')
+	else:
+		log.error(f"No trade symbol definition for {symbol}, {algoId}, {timeframe}, {type}")
 
 async def WatchAlgoSignalsCollection():
 	while True:
