@@ -76,4 +76,5 @@ def webhook():
 			'message': 'hook failed authentication'
 		}
 
-app.run(debug=True)
+# TradingView can only send to port 80 or 443 and we now listen externally for the signal event from just one TV account
+app.run(debug=True, host='0.0.0.0', port=80)
