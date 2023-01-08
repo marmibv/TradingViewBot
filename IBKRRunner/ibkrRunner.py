@@ -1,6 +1,5 @@
 from motor import motor_asyncio as AsyncMongoClient
 import json
-from ib_insync import *
 import asyncio
 import config, logging, sys, math
 from datetime import datetime, timedelta
@@ -35,7 +34,7 @@ log.setLevel(logging.DEBUG)
 dbClient = AsyncMongoClient.AsyncIOMotorClient("mongodb://localhost:27017")
 algoBotDb = dbClient['AlgoBot']
 signalsDoc = algoBotDb['TVSignals']
-tradeDb = dbClient['TradeBot-niall']
+tradeDb = dbClient['TradeBot']
 ordersTbl = tradeDb['OrderAudit']
 positionsTbl = tradeDb['Positions']
 positionsAuditTbl = tradeDb['PositionsAudit']
