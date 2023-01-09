@@ -481,8 +481,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			else:
 				# Timeout - probably bad ticker ID
 				waitingForTickInfo = False
-		# TODO Grab min tick setting and do this right
-		contract.price = round(contract.price, 2)
+		# TODO Grab min tick setting and do this rounding correctly
+		contract.price = round(contract.price, 2) if (hasattr(contract, 'price') and contract.price > 0) else 9999999999.0
 		return contract
 
 	async def GetOptionContractDetails(self, symbol, right, strike, targetDay):
