@@ -1,11 +1,10 @@
 from flask import Flask, request
 import json
-import Database as Database
 import pymongo
 import logging
 import sys
 
-logging.basicConfig(filename="algorunner.log", filemode='w', level=logging.ERROR)
+logging.basicConfig(filename="webhook.log", filemode='w', level=logging.ERROR)
 logging.basicConfig(stream=sys.stdout, level=logging.ERROR)
 
 # Add an operation level event to root logger
@@ -23,7 +22,7 @@ lroot = logging.getLogger()
 lroot.setLevel(logging.ERROR)
 lroot.addHandler(handler)
 
-log = logging.getLogger('MAIN')
+log = logging.getLogger('WEBHOOK')
 log.setLevel(logging.DEBUG)
 
 app = Flask("tvbotweb")
@@ -45,36 +44,35 @@ def LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, close, t
  
 @app.route("/webhook", methods=['POST'])
 def webhook():
-	postMsg = json.loads(request.data)
-	log.oper(f'Received webhook msg: {postMsg}')
-	# What are we doing?
-	# Parse out the message and log it in the signals database
-	if postMsg['phrase'] == 'CrispyBlueDuck':
-		algoId = postMsg['algo'].upper()
-		symbol = postMsg['ticker']
-		timeframe = postMsg['timeframe']
-		type = postMsg['type'].upper() # option, stock, future etc...
-		side = postMsg['side'].upper()
-		right = postMsg['right'].upper()
-		signal = postMsg['reason']
-		price = postMsg['close']
-		tier = 1
-		ts = postMsg['time']
-  
-		symbol = symbolLookup[symbol] if symbol in symbolLookup else symbol
+	try:
+		postMsg = json.loads(request.data)
+		# What are we doing?
+		# Parse out the message and log it in the signals database
+		if postMsg['phrase'] == 'CrispyBlueDuck':
+			algoId = postMsg['algo'].upper()
+			symbol = postMsg['ticker'].upper()
+			timeframe = postMsg['timeframe']
+			type = postMsg['type'].upper() # option, stock, future etc...
+			side = postMsg['side'].upper() # buy/sell
+			right = postMsg['right'].upper() # call/put
+			signal = postMsg['reason'] # reason for signal
+			close = postMsg['close'] # close at signal
+			tier = 1
+			ts = postMsg['time'] # timestamp of signal
+			log.oper(f'Logging signal {algoId}:{symbol}:{timeframe}:{type} {side} {symbol} {right} at {close} because {signal} ({tier}:{ts})')
 
-		LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, price, tier, ts)
-		log.oper(f'Logging signal {algoId}:{symbol}:{timeframe}:{type}:{side}:{right}:{signal}:{price}:{tier}:{ts}')
-		print(postMsg)
-		return {
-			'code': 200,
-			'message': 'hook successfully logged trade signal'
-		}
-	else:
-		return {
-			'code': 403,
-			'message': 'hook failed authentication'
-		}
+			# perform cross reference lookup, ie BNBUSDT->BNB-USDT
+			symbol = symbolLookup[symbol] if symbol in symbolLookup else symbol
+
+			# Log signal in DB
+			LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, close, tier, ts)
+			return {'code': 200, 'message': 'hook successfully logged trade signal'}
+		else:
+			return {'code': 403, 'message': 'hook failed authentication'}
+	except Exception as e:
+		log.error(f'Exception occurred processing webhook contents {e}')
+		return {'code': 500, 'message': 'unable to process json post content'}
 
 # TradingView can only send to port 80 or 443 and we now listen externally for the signal event from just one TV account
-app.run(debug=True, host='0.0.0.0', port=80)
+#app.run(debug=True, host='0.0.0.0', port=80)
+app.run(debug=True)

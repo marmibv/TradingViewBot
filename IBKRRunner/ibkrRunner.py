@@ -112,7 +112,9 @@ async def onTradeSignal(signal):
 			# Sell all positions for this symbol, algo, timegrame, type and right (if option)
 			# There may have been different strikes/expiries opened and perhaps not closed due to order issues, clean them all up since
 			# we're getting a signal to sell.
+			anyMatchingPositions = False
 			async for position in positionsTbl.find({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type, 'right': right}):
+				anyMatchingPositions = True
 				if position and 'symbol' in position:
 					symbol = position['symbol']; algoId = position['algoId']; timeframe = position["timeframe"]; type = position['type']
 					right = position['right']; strike = position['strike']; expiry = position['expiry']; quantity = position['quantity']
@@ -131,7 +133,8 @@ async def onTradeSignal(signal):
 							auditPositionFields['id'] = positionId
 							positionsAuditTbl.insert_one(auditPositionFields)
 		
-							# Update quantity for this position definition
+							# Update quantity for this position definition - should probably just delete it, there will end up being a huge
+							# number of zero positions in a short amount of time, nice to have it for a while though, so maybe purge after a day or two
 							await positionsTbl.update_one({'_id': positionId}, {'$set': {'quantity': 0}})
 		
 							# Update allocation available
@@ -143,6 +146,8 @@ async def onTradeSignal(signal):
 						log.error(f'Received sell signal for position with zero quantity {symbol}:{right}')
 				else:
 					log.error(f'Unable to find position for {symbol}:{right}')
+			if not anyMatchingPositions:
+				log.error(f'Received sell alert for {symbol}:{algoId}:{timeframe}:{type}:{right} but there were no matching positions found.')
 	else:
 		log.error(f"No trade symbol definition for {symbol}, {algoId}, {timeframe}, {type}")
 
