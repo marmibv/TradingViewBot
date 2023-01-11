@@ -1,11 +1,8 @@
 from motor import motor_asyncio as AsyncMongoClient
-import json
 import asyncio
-import config, logging, sys, math
-from datetime import datetime, timedelta
+import  logging, sys
 from IBKRApi import IBKRTradeApi
 from StockAPI import OptionOrder
-
 
 logging.basicConfig(filename="algorunner.log", filemode='w', level=logging.ERROR)
 logging.basicConfig(stream=sys.stdout, level=logging.ERROR)
@@ -80,7 +77,7 @@ async def onTradeSignal(signal):
 		allocation = tradedSymbolDef['allocation']
 		if side == 'BUY':
 			# BuyMarket... is blocking but async, we have full info after it returns
-			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, close, allocation)
+			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, close, allocation, stop=15)
 			if order and order.status == 'success':
 				# Order has completed, let's record the order sepcifics from IBKR, then update our cash and positions
 				oo = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, order.quantity)

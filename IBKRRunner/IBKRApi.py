@@ -2,7 +2,8 @@ from datetime import datetime, timedelta
 from math import trunc
 from random import random
 from StockAPI import StockAPI
-from StockAPI import OrderStatus, OptionOrder, OptionContract, Position, TradePlatformApi
+from StockAPI import OrderStatus, OptionOrder, Position, TradePlatformApi
+import pytz
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
@@ -220,9 +221,6 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		else:
 			logger.error(f'Unable to update order for: {ticker} must already be closed')
 
-	async def GetCurrentPrice(self, symbol):
-		return 282
-
 	async def GetCurrentPositions(self):
 		self._authenticated.wait()
 		self.positions = []
@@ -286,9 +284,11 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.orderType = 'MKT'
 		order.eTradeOnly = False
 		order.firmQuoteOnly = False
+		order.algoStrategy = 'Adaptive'
+		order.algoParams = {'adaptivePriority': 'Normal'}
 		return order
 
-	def _createLimitOrder(self, action, qty, limit):
+	def _createLimitOrder(self, action, qty, limit, afterHours = False):
 		# Create order object
 		order = Order()
 		order.action = action.upper()
@@ -297,7 +297,9 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.lmtPrice = limit
 		order.eTradeOnly = False
 		order.firmQuoteOnly = False
-		order.outsideRth = True
+		order.algoStrategy = 'Adaptive'
+		order.algoParams = {'adaptivePriority': 'Normal'}
+		order.outsideRth = afterHours
 		return order
 
 	def PlaceStockOrder(self, oo):
@@ -316,7 +318,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		if self.AfterHours():
 			contract = await self.GetCurrentOptionPrice(symbol, right, strike, expiry)
 			limit = (contract.bidPrice + contract.askPrice) / 2
-			order = self._createLimitOrder('sell', quantity, limit)
+			order = self._createLimitOrder('sell', quantity, limit, afterHours=True)
 		else:
 			order = self._createMarketOrder('sell', quantity)
 		oo = OptionOrder(symbol, right, 'sell', expiry, strike, 0)
@@ -334,15 +336,17 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return retval
 
 	def AfterHours(self):
-		now = datetime.now()	# TODO - figure out time zones for this thing, perhaps by ticker Local time, PST
+		now = datetime.now(pytz.timezone('America/New_York'))
 		afterHours =  now.hour > 16 or now.hour < 9 or (now.hour == 9 and now.minute >= 30)
 		return afterHours
 
-	async def BuyAtmOptionsAtMarket(self, symbol, right, close, allocation):
+	async def BuyAtmOptionsAtMarket(self, symbol, right, close, allocation, stop=None):
 		retval = None
 		self._authenticated.wait()
+		# TODO Log request
 		contracts = await self.GetOptionContractsAtmClosest(symbol, right, close)
 		for contract in contracts:
+			# Log contract
 			quantity = trunc(allocation / (contract.price * 100))
 			oo = OptionOrder(symbol, right, 'BUY', contract.lastTradeDateOrContractMonth, contract.strike, allocation, quantity=quantity)
 			if quantity > 0:
@@ -351,12 +355,23 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 				order = None
 				timeout = None
 				if self.AfterHours():
-					order = self._createLimitOrder('BUY', quantity, contract.askPrice)
+					order = self._createLimitOrder('BUY', quantity, contract.askPrice, afterHours=True)
 					timeout = 240
 				else:
 					order = self._createMarketOrder('BUY', quantity)
 					timeout = 120	 # Wait 2 minutes for a market buy
+				# TODO Log order
 				self.placeOrder(self.nextValidOrderId, contract, order)
+				# If a stop is specified, enter a stop market order
+				if (stop):
+					stopMarketOrder = Order()
+					stopMarketOrder.action = 'SELL'
+					stopMarketOrder.orderType = 'STP'
+					stopMarketOrder.auxPrice = (contract.price * (1 - stop))
+					stopMarketOrder.totalQuantity = quantity
+					stopMarketOrder.algoStrategy = 'Adaptive'
+					stopMarketOrder.algoParams = {'adaptivePriority': 'Normal'}
+					self.placeOrder(self.nextValidOrderId, contract, order)
 				if self._orderEvent.wait(timeout):
 					self._orderEvent.clear()
 					oo.status = 'success'
@@ -388,7 +403,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	async def GetOptionContractsAtmClosest(self, symbol, right, close):
 		contracts = []
 		self._authenticated.wait()
-		today = datetime.now()
+		today = datetime.now(pytz.timezone('America/New_York'))
 		dayOfWeek = today.weekday()  # 0 = Monday, 6 = Sunday
 		hourOfDay = today.hour  # What time zone is this in?  Local?
 		# QQQ, SPY has options on days 0, 1, 2, 3, 4 (M, T, W, Th, F)

@@ -74,5 +74,5 @@ def webhook():
 		return {'code': 500, 'message': 'unable to process json post content'}
 
 # TradingView can only send to port 80 or 443 and we now listen externally for the signal event from just one TV account
-#app.run(debug=True, host='0.0.0.0', port=80)
+#app.run(debug=False, host='0.0.0.0', port=80)
 app.run(debug=True)
