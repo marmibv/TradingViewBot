@@ -76,9 +76,10 @@ async def onTradeSignal(signal):
 	if (tradedSymbolDef):
 		allocation = tradedSymbolDef['allocation']
 		if side == 'BUY':
+			log.oper(f'Attempting to buy {symbol} {right} options ATM, close: {close} using allocation of ${allocation}')
 			# BuyMarket... is blocking but async, we have full info after it returns
 			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, close, allocation, stop=15)
-			if order and order.status == 'success':
+			if order and order.status == 'SUCCESS':
 				# Order has completed, let's record the order sepcifics from IBKR, then update our cash and positions
 				oo = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, order.quantity)
 				await ordersTbl.insert_one(oo.__dict__)
@@ -103,13 +104,14 @@ async def onTradeSignal(signal):
 				allocation -= (order.quantity * order.price * 100)
 				await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': allocation}})
 			else:
-				log.error(f'Failed to execute buy order for {symbol}:{right}')
+				log.error(f'Failed to execute buy order for {symbol}:{right} with status: {order.status if order else "no order returned"}')
 
 		elif side == 'SELL':
 			# Sell all positions for this symbol, algo, timegrame, type and right (if option)
 			# There may have been different strikes/expiries opened and perhaps not closed due to order issues, clean them all up since
 			# we're getting a signal to sell.
 			anyMatchingPositions = False
+			log.oper(f'Attempting to sell {symbol} {right} options, close: {close} will add proceeds to  allocation of ${allocation}')
 			async for position in positionsTbl.find({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type, 'right': right}):
 				anyMatchingPositions = True
 				if position and 'symbol' in position:
@@ -118,7 +120,7 @@ async def onTradeSignal(signal):
 					if (quantity > 0):
 						# SellMarket is blocking but async, so we will have all order info on return
 						order = await ibkrApi.SellOptionsAtMarket(symbol, right, strike, expiry, quantity)
-						if order and order.status == 'success':
+						if order and order.status == 'SUCCESS':
 							# Order has completed, let's log the order, then update our cash and positions
 							optionOrder = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, quantity=order.quantity)
 							await ordersTbl.insert_one(optionOrder.__dict__)
@@ -134,9 +136,10 @@ async def onTradeSignal(signal):
 							# number of zero positions in a short amount of time, nice to have it for a while though, so maybe purge after a day or two
 							await positionsTbl.update_one({'_id': positionId}, {'$set': {'quantity': 0}})
 		
-							# Update allocation available
-							cashProceeds = order.quantity * order.price * 100
-							await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': round(allocation + cashProceeds, 2)}})
+							# Update allocation available if in pdt exempt mode, else leave allocation changes to the user
+							if 'pdtExempt' in tradedSymbolDef and tradedSymbolDef['pdtExempt']:
+								cashProceeds = order.quantity * order.price * 100
+								await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': round(allocation + cashProceeds, 2)}})
 						else:
 							log.error(f'Failed to execute sell order for {symbol}:{right}')
 					else:

@@ -26,6 +26,9 @@ log = logging.getLogger('WEBHOOK')
 log.setLevel(logging.DEBUG)
 
 app = Flask("tvbotweb")
+flaskLogger = logging.getLogger('werkzeug')
+flaskLogger.setLevel(logging.ERROR)
+
 client = pymongo.MongoClient("mongodb://localhost:27017")
 algoBotDb = client['AlgoBot']
 signalsDoc = algoBotDb['TVSignals']

@@ -14,7 +14,7 @@ from ibapi.common import *
 import threading
 import logging
 
-logger = logging.getLogger('IBKR')
+log = logging.getLogger('IBKR')
 
 class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def __init__(self):
@@ -47,9 +47,9 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.task.start()
 
 	async def Connect(self):
-		logger.debug('Connecting to IBKR streaming...')
+		log.debug('Connecting to IBKR streaming...')
 		self.connect(self.url, 7496, int(random()*10000))
-		logger.debug('Connected to IBKR streaming.')
+		log.debug('Connected to IBKR streaming.')
 		await self._authenticate()
 
 	def Shutdown(self):
@@ -79,14 +79,14 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def nextValidId(self, orderId: int):
 		super().nextValidId(orderId)
 		self.nextValidOrderId = orderId
-		logger.error(f"NextValidId: {orderId}")
+		log.error(f"NextValidId: {orderId}")
 		# we can start now
 		self._authenticated.set()
 
 	# Callback to receive a (partial) list of open orders
 	def openOrder(self, orderId: OrderId, contract: Contract, order: Order, orderState: OrderState):
 		super().openOrder(orderId, contract, order, orderState)
-		logger.debug(f"OpenOrder. PermId: {order.permId}, ClientId: {order.clientId}, OrderId: {orderId}, Account: {order.account}, Symbol: {contract.symbol}")
+		log.debug(f"OpenOrder. PermId: {order.permId}, ClientId: {order.clientId}, OrderId: {orderId}, Account: {order.account}, Symbol: {contract.symbol}")
 			# "SecType:", contract.secType,
 			#   "Exchange:", contract.exchange, "Action:", order.action, "OrderType:", order.orderType,
 			#   "TotalQty:", order.totalQuantity, "CashQty:", order.cashQty, 
@@ -104,7 +104,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def orderStatus(self, orderId: OrderId, status: str, filled: float, remaining: float, avgFillPrice: float, permId: int,
 					parentId: int, lastFillPrice: float, clientId: int, whyHeld: str, mktCapPrice: float):
 		super().orderStatus(orderId, status, filled, remaining, avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice)
-		logger.debug("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled, "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
+		log.debug("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled, "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
 			  "PermId:", permId, "ParentId:", parentId, "LastFillPrice:", lastFillPrice, "ClientId:", clientId, "WhyHeld:", whyHeld, "MktCapPrice:", mktCapPrice)
 		if orderId in self.orders:
 			ibkrOrder = self.orders[orderId]
@@ -150,7 +150,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 				'price': price,
 				'attrib': attrib
 			}
-			logger.debug(tickInfo)
+			log.debug(tickInfo)
 			# The ticks come in order, any of these indicate that we have enough information to proceed
 			if tickType == 'last' or tickType == 'close' or tickType == 'hod' or tickType == 'lod':
 				self.evTickPrice.set()
@@ -159,7 +159,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def position(self, account, contract: Contract, pos, avgCost):
 		pos = Position(contract.tradingClass, pos, avgCost, avgCost)
 		self.positions.append(pos)
-		logger.debug(pos)
+		log.debug(pos)
 
 	def contractDetails(self, reqId: int, contractDetails):
 		self.optionContractDetails = contractDetails
@@ -167,19 +167,19 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 
 	async def SubscribeToTrades(self):
 		self._authenticated.wait()
-		logger.debug(f'Subscribed to IBKR trades - NO-OP')
+		log.debug(f'Subscribed to IBKR trades - NO-OP')
 		# Nothing to do, IBKR api is automatically subscribed to trade updates via EWrapper/EClient
 
 	async def UnsubscribeFromTrades(self):
 		self._authenticated.wait()
-		logger.debug(f'Unsubscribed from IBKR trades - NO-OP')
+		log.debug(f'Unsubscribed from IBKR trades - NO-OP')
 		# Nothing to do
 
 	async def _authenticate(self):
-		logger.debug('Authenticating to IBKR local endpoint - NO-OP')
+		log.debug('Authenticating to IBKR local endpoint - NO-OP')
 		# Nothing to do here, IBKR authentication is handled external to this application, through the IB Gateway or the TWS client
 		# Local connection to the API gateway running on local machine is by whitelisted IP, no authentication required.
-		logger.debug('Authenticated to IBKR streaming.')
+		log.debug('Authenticated to IBKR streaming.')
 
 	def SubscribeTickerOrders(self, ticker, subscriber):
 		self.subscribers[ticker] = subscriber
@@ -219,7 +219,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		if oo:
 			self.api.replace_order(oo.nativeOrderID, limit_price=newLimit)
 		else:
-			logger.error(f'Unable to update order for: {ticker} must already be closed')
+			log.error(f'Unable to update order for: {ticker} must already be closed')
 
 	async def GetCurrentPositions(self):
 		self._authenticated.wait()
@@ -227,7 +227,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		try:
 			self.reqPositions()
 		except Exception:
-			logger.exception("Failed to get current positions")
+			log.exception("Failed to get current positions")
 		return self.positions
 
 
@@ -332,7 +332,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			oo.status = 'success'
 			retval = oo
 		else:
-			logger.error(f'Unable to place order {oo}')
+			log.error(f'Unable to place order {oo}')
 		return retval
 
 	def AfterHours(self):
@@ -347,6 +347,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		contracts = await self.GetOptionContractsAtmClosest(symbol, right, close)
 		for contract in contracts:
 			# Log contract
+			log.oper(f'ATM Contract found: {symbol}-{right}-{contract.lastTradeDateOrContractMonth}-{contract.strike} at {contract.price}')
 			quantity = trunc(allocation / (contract.price * 100))
 			oo = OptionOrder(symbol, right, 'BUY', contract.lastTradeDateOrContractMonth, contract.strike, allocation, quantity=quantity)
 			if quantity > 0:
@@ -374,25 +375,25 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 					self.placeOrder(self.nextValidOrderId, contract, order)
 				if self._orderEvent.wait(timeout):
 					self._orderEvent.clear()
-					oo.status = 'success'
+					oo.status = 'SUCCESS'
 					oo.quantity = quantity
 					oo.price = self.lastOrder.price
 					oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
 					retval = oo
 				else:
-					logger.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
+					log.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
 				# We've placed an order, get out of loop
 				break
 			else:
-				oo.status = 'insufficient funds'
-				oo.quantity = 0
-				oo.price = contract.price
-				logger.error(oo)
-		else:
-			oo = OptionOrder(symbol, right, 'BUY', None, None, allocation, quantity=0)
-			oo.status = 'no options found'
-			oo.price = None
-			logger.error(oo)
+				retval = oo
+				oo.price = 99999999
+				oo.status = 'INSUFFICIENT FUNDS'
+				log.error(f'Insufficient funds to purchase {symbol}-{right}-{oo.expiry}-{oo.strike} for ${oo.price}')
+		if len(contracts) <= 0:
+			retval = oo
+			oo.price = 99999999
+			oo.status = 'NO OPTIONS FOUND'
+			log.error(f'No contracts found for {symbol}-{right}-{oo.expiry}-{oo.strike}')
 		return retval
 
 	def _roundTo(self, x, minIncrement):
@@ -450,7 +451,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			elif dayOfWeek == 6:  # Sunday - go to monday
 				targetDay = today + timedelta(days=1)
 		else: # Monthlies only
-			logger.debug('No weekly options avail, no trade')
+			log.debug('No weekly options avail, no trade')
 
 		strikeIncrement = optionsConfig['optionTick']
 		strike = self._roundTo(close, strikeIncrement)
@@ -458,8 +459,14 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		# TODO - pull a few strikes, find the first one (up or down) that doesn't have a crazy spread, and has some bid/ask sizes
 		# sometimes we get raped on options that have a $1 or more spread.
 		# Or maybe just switch to 1DTE sometime around 2pm - that's when the 0DTEs seem to dry up.
-		# Go first strike OTM, not ATM, the ATM and better options have crazy spreads on SPX/XSP close to end of day.
-		strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
+  
+		# If XSP go first strike OTM, not ATM, the ATM and better options have crazy spreads on XSP close to end of day.
+		# First ATM put will be the result of the rounding, no need to subtract anything, calls need to go up one strikeIncrement
+		if symbol == 'XSP':
+			strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
+		else:
+			strike = strike + strikeIncrement if right == 'CALL' else strike
+   
 		atmContract = await self.GetCurrentOptionPrice(symbol, right, strike, targetDay)
 		otmContract = await self.GetCurrentOptionPrice(symbol, right, strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement, targetDay)
 		contracts.append(atmContract)
