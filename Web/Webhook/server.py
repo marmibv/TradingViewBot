@@ -40,9 +40,9 @@ symbolLookup = {
 def makeAlgoSignalKey(algoId, symbol, timeframe):
 	return f'{algoId}:{symbol}:{timeframe}'
 
-def LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, close, tier, ts):
+def LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, tier, ts):
 	id = f'{makeAlgoSignalKey(algoId, symbol, timeframe)}:{ts}'
-	row = {'_id': id, 'type': type, 'side': side, 'right': right, 'signal': signal, 'close': close, 'tier': tier, 'timestampSeconds': ts, 'algoId': algoId, 'symbol': symbol, 'timeframe': timeframe}
+	row = {'_id': id, 'type': type, 'side': side, 'right': right, 'signal': signal, 'tier': tier, 'timestampSeconds': ts, 'algoId': algoId, 'symbol': symbol, 'timeframe': timeframe}
 	signalsDoc.insert_one(row)
  
 @app.route("/webhook", methods=['POST'])
@@ -59,16 +59,15 @@ def webhook():
 			side = postMsg['side'].upper() # buy/sell
 			right = postMsg['right'].upper() # call/put
 			signal = postMsg['reason'] # reason for signal
-			close = postMsg['close'] # close at signal
 			tier = 1
 			ts = postMsg['time'] # timestamp of signal
-			log.oper(f'Logging signal {algoId}:{symbol}:{timeframe}:{type} {side} {symbol} {right} at {close} because {signal} ({tier}:{ts})')
+			log.oper(f'Logging signal {algoId}:{symbol}:{timeframe}:{type} {side} {symbol} {right} because {signal} ({tier}:{ts})')
 
 			# perform cross reference lookup, ie BNBUSDT->BNB-USDT
 			symbol = symbolLookup[symbol] if symbol in symbolLookup else symbol
 
 			# Log signal in DB
-			LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, close, tier, ts)
+			LogAlgoSignal(algoId, symbol, timeframe, type, side, right, signal, tier, ts)
 			return {'code': 200, 'message': 'hook successfully logged trade signal'}
 		else:
 			return {'code': 403, 'message': 'hook failed authentication'}

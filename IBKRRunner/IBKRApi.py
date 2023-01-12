@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
+import asyncio
 from math import trunc
 from random import random
 from StockAPI import StockAPI
 from StockAPI import OrderStatus, OptionOrder, Position, TradePlatformApi
 import pytz
+import contextlib
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
 from ibapi.contract import Contract
@@ -11,10 +13,11 @@ from ibapi.order import *
 from ibapi.order_state import *
 from ibapi.order_condition import *
 from ibapi.common import *
+from ibapi.tag_value import TagValue
 import threading
 import logging
 
-log = logging.getLogger('IBKR')
+log = logging.getLogger('MAIN')
 
 class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def __init__(self):
@@ -23,13 +26,22 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.orders = {}
 		self.ibkrOrders = {}
 		self.url = f"127.0.0.1"
-		self._authenticated = threading.Event()
-		self._orderEvent = threading.Event()
-		self.evOptionContractDetails = threading.Event()
-		self.evTickPrice = threading.Event()
+		self._authenticated = asyncio.Event()
+		self._orderEvent = asyncio.Event()
+		self.evOptionContractDetails = asyncio.Event()
+		self.evTickPrice = asyncio.Event()
 		self.task = None
 		self.marketDataRequestId = 1
 		self.tickInfo = {}
+		# Tick Type definitions: 1 - Bid Price,  2 - Ask Price, 4 - Last Price,  6 - High of day, 7 - Low of day,  9 - Close of last day
+		self.tickIdLookup = {
+			'1': 'bid',
+			'2': 'ask',
+			'4': 'last',
+			'6': 'hod',
+			'7': 'lod',
+			'9': 'close'
+		}
 
 	def GetAsyncCoroutine(self):
 		return self.task
@@ -51,6 +63,12 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.connect(self.url, 7496, int(random()*10000))
 		log.debug('Connected to IBKR streaming.')
 		await self._authenticate()
+
+	async def event_wait(self, evt, timeout):
+		# suppress TimeoutError because we'll return False in case of timeout
+		with contextlib.suppress(asyncio.TimeoutError):
+			await asyncio.wait_for(evt.wait(), timeout)
+		return evt.is_set()
 
 	def Shutdown(self):
 		self.cancelAccountSummary()
@@ -86,7 +104,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	# Callback to receive a (partial) list of open orders
 	def openOrder(self, orderId: OrderId, contract: Contract, order: Order, orderState: OrderState):
 		super().openOrder(orderId, contract, order, orderState)
-		log.debug(f"OpenOrder. PermId: {order.permId}, ClientId: {order.clientId}, OrderId: {orderId}, Account: {order.account}, Symbol: {contract.symbol}")
+		log.debug(f"OpenOrder. OrderId: {orderId}, Account: {order.account}, Symbol: {contract.symbol}")
 			# "SecType:", contract.secType,
 			#   "Exchange:", contract.exchange, "Action:", order.action, "OrderType:", order.orderType,
 			#   "TotalQty:", order.totalQuantity, "CashQty:", order.cashQty, 
@@ -104,45 +122,35 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	def orderStatus(self, orderId: OrderId, status: str, filled: float, remaining: float, avgFillPrice: float, permId: int,
 					parentId: int, lastFillPrice: float, clientId: int, whyHeld: str, mktCapPrice: float):
 		super().orderStatus(orderId, status, filled, remaining, avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice)
-		log.debug("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled, "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
-			  "PermId:", permId, "ParentId:", parentId, "LastFillPrice:", lastFillPrice, "ClientId:", clientId, "WhyHeld:", whyHeld, "MktCapPrice:", mktCapPrice)
+		log.debug(f'OrderStatus - id: {orderId}, status: {status}, filled qty: {filled}, remain qty: {remaining}, avg fill price: {avgFillPrice}')
 		if orderId in self.orders:
 			ibkrOrder = self.orders[orderId]
 			if ibkrOrder.contract:
-				symbol = ibkrOrder.contract.localSymbol[:3] + '-' + ibkrOrder.contract.localSymbol[4:]
-				if filled >= ibkrOrder.totalQuantity:
-					self.lastOrder = OrderStatus(symbol, float(filled), ibkrOrder.action, float(avgFillPrice), orderId, status='filled')
-					self._orderEvent.set()
-					if symbol in self.subscribers:
-						subscriber = self.subscribers[symbol]
-						subscriber(self.lastOrder)
+				if ibkrOrder.contract.secType == 'OPT':
+					parts = ibkrOrder.contract.localSymbol.split(' ')
+					symbol = parts[0] + '-' + parts[1]
+				else:
+					symbol = ibkrOrder.contract.localSymbol[:3] + '-' + ibkrOrder.contract.localSymbol[4:]
+				status = 'filled' if remaining == 0 else 'partial'
+				self.lastOrder = OrderStatus(symbol, float(filled), ibkrOrder.action, float(avgFillPrice), orderId, status=status)
+				self._orderEvent.set()
+				if symbol in self.subscribers:
+					subscriber = self.subscribers[symbol]
+					subscriber(self.lastOrder)
+			else:
+				log.error('Received order status without contract info')
 		# TODO else conditions?
 		# TODO Handle cancel order, failed order, all the things that can go wrong
 
 	def tickPrice(self, reqId: TickerId, tickId: int, price: float, attrib: TickAttrib):
-		# Field definitions:
-		# 1 - Bid Price
-		# 2 - Ask Price
-		# 4 - Last Price
-		# 6 - High of day
-		# 7 - Low of day
-		# 9 - Close of last day
-		tickIdLookup = {
-			'1': 'bid',
-			'2': 'ask',
-			'4': 'last',
-			'6': 'hod',
-			'7': 'lod',
-			'9': 'close'
-		}
 		# For most things we care only about the ask
 		requestId = f'{reqId}'
 		tickId = f'{tickId}'
-		if tickId in tickIdLookup:
+		if tickId in self.tickIdLookup:
 			if requestId not in self.tickInfo:
 				self.tickInfo[requestId] = {}
 			req = self.tickInfo[requestId]
-			tickType = tickIdLookup[tickId]
+			tickType = self.tickIdLookup[tickId]
 			req[tickType] = price
 			tickInfo = {
 				'reqId': reqId,
@@ -166,12 +174,12 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.evOptionContractDetails.set()
 
 	async def SubscribeToTrades(self):
-		self._authenticated.wait()
+		await asyncio .wait_for(self._authenticated.wait(), None)
 		log.debug(f'Subscribed to IBKR trades - NO-OP')
 		# Nothing to do, IBKR api is automatically subscribed to trade updates via EWrapper/EClient
 
 	async def UnsubscribeFromTrades(self):
-		self._authenticated.wait()
+		await asyncio .wait_for(self._authenticated.wait(), None)
 		log.debug(f'Unsubscribed from IBKR trades - NO-OP')
 		# Nothing to do
 
@@ -191,7 +199,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		await self.SubscribeToTrades()
 
 	def GetTradeableStocks(self):
-		assert('IBKR-GetShortableStocks Not supported')
+		assert('IBKR-GetTradeableStocks Not supported')
 		return None
 		
 	def GetShortableStocks(self):
@@ -204,25 +212,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		# Data will be returned in callbacks openOrder and orderStatus, need to make this an async
 		return None
 
-
-	def GetOpenOrderFor(self, symbol):
-		order = None
-		oos = self.GetOpenOrders()
-		if oos:
-			for oo in oos:
-				if oo.symbol == symbol:
-					order = oo
-		return order
-	
-	def UpdateOrderPrice(self, ticker, newLimit):
-		oo = self.GetOpenOrderFor(ticker)
-		if oo:
-			self.api.replace_order(oo.nativeOrderID, limit_price=newLimit)
-		else:
-			log.error(f'Unable to update order for: {ticker} must already be closed')
-
 	async def GetCurrentPositions(self):
-		self._authenticated.wait()
+		await asyncio .wait_for(self._authenticated.wait(), None)
 		self.positions = []
 		try:
 			self.reqPositions()
@@ -230,9 +221,44 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			log.exception("Failed to get current positions")
 		return self.positions
 
+	async def GetCurrentPrice(self, symbol):
+		await asyncio .wait_for(self._authenticated.wait(), None)
+		contract = Contract()
+		contract.symbol = symbol
+		contract.secType = "STK"
+		contract.exchange = "SMART"
+		contract.currency = "USD"
+		self.reqMktData(self.marketDataRequestId,  contract, '', True, False, '')
+		reqId = f'{self.marketDataRequestId}'
+		self.marketDataRequestId += 1
+		waitingForTickInfo = True
+		while waitingForTickInfo:
+			if await self.event_wait(self.evTickPrice, 5):
+				self.evTickPrice.clear()
+				if reqId in self.tickInfo:
+					tickInfo = self.tickInfo[reqId]
+					contract.askPrice = tickInfo['ask'] if 'ask' in tickInfo else contract.askPrice if hasattr(contract, 'askPrice') else None
+					contract.bidPrice = tickInfo['bid'] if 'bid' in tickInfo else contract.bidPrice if hasattr(contract, 'bidPrice') else None
+					contract.lastPrice = tickInfo['last'] if 'last' in tickInfo else contract.lastPrice if hasattr(contract, 'lastPrice') else None
+					if 'last' in tickInfo:
+						contract.price = tickInfo['last']
+						waitingForTickInfo = False
+					elif 'ask' and 'bid' in tickInfo:
+						contract.price = (tickInfo['ask'] + tickInfo['bid']) / 2
+					elif 'ask' in tickInfo:
+						contract.price = tickInfo['ask']
+					elif 'bid' in tickInfo:
+						contract.price = tickInfo['bid']
+					else:
+						# Got no useful price info, force 0 quantity by listing huge premium
+						contract.price = 9999999999
+			else:
+				# Timeout - probably bad ticker ID
+				waitingForTickInfo = False
+		return contract.price
 
-	def GetCurrentPositionFor(self, symbol):
-		self._authenticated.wait()
+	async def GetCurrentPositionFor(self, symbol):
+		await asyncio .wait_for(self._authenticated.wait(), None)
 		position = None
 		pss = self.GetCurrentPositions()
 		for ps in pss:
@@ -276,7 +302,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.outsideRth = True
 		return order
 
-	def _createMarketOrder(self, action, qty):
+	def _createMarketOrder(self, action, qty, afterHours=False):
 		# Create order object
 		order = Order()
 		order.action = action.upper()
@@ -284,8 +310,36 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.orderType = 'MKT'
 		order.eTradeOnly = False
 		order.firmQuoteOnly = False
-		order.algoStrategy = 'Adaptive'
-		order.algoParams = {'adaptivePriority': 'Normal'}
+		if not afterHours:
+			order.algoStrategy = 'Adaptive'
+			order.algoParams = []
+			order.algoParams.append(TagValue('adaptivePriority', 'Normal'))
+		return order
+
+	def _createTrailStopOrder(self, action, qty, trailPerc, afterHours=False):
+		order = Order()
+		order.action = action.upper()
+		order.orderType = 'TRAIL'
+		order.totalQuantity = qty
+		order.trailingPercent = trailPerc
+		order.eTradeOnly = False
+		if not afterHours:
+			order.algoStrategy = 'Adaptive'
+			order.algoParams = []
+			order.algoParams.append(TagValue('adaptivePriority', 'Normal'))
+		return order
+
+	def _createStopLossOrder(self, action, qty, price, afterHours=False):
+		order = Order()
+		order.action = action.upper()
+		order.orderType = 'STP'
+		order.auxPrice = price
+		order.totalQuantity = qty
+		order.eTradeOnly = False
+		if not afterHours:
+			order.algoStrategy = 'Adaptive'
+			order.algoParams = []
+			order.algoParams.append(TagValue('adaptivePriority', 'Normal'))
 		return order
 
 	def _createLimitOrder(self, action, qty, limit, afterHours = False):
@@ -297,13 +351,15 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.lmtPrice = limit
 		order.eTradeOnly = False
 		order.firmQuoteOnly = False
-		order.algoStrategy = 'Adaptive'
-		order.algoParams = {'adaptivePriority': 'Normal'}
+		if not afterHours:
+			order.algoStrategy = 'Adaptive'
+			order.algoParams = []
+			order.algoParams.append(TagValue('adaptivePriority', 'Normal'))
 		order.outsideRth = afterHours
 		return order
 
-	def PlaceStockOrder(self, oo):
-		self._authenticated.wait()
+	async def PlaceStockOrder(self, oo):
+		await asyncio .wait_for(self._authenticated.wait(), None)
 		retval = None
 		contract = self._createForexContract(oo.symbol)
 		order = self._createOrder(oo.side, oo.price, oo.quantity, oo.kind)
@@ -317,7 +373,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		mktContract = self._createOptionContract(symbol, right, strike, expiry)
 		if self.AfterHours():
 			contract = await self.GetCurrentOptionPrice(symbol, right, strike, expiry)
-			limit = (contract.bidPrice + contract.askPrice) / 2
+			# TODO Get this from min tick definition on the ticker or underlying
+			limit = round((contract.bidPrice + contract.askPrice) / 2, 2)
 			order = self._createLimitOrder('sell', quantity, limit, afterHours=True)
 		else:
 			order = self._createMarketOrder('sell', quantity)
@@ -326,13 +383,13 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.orders[self.nextValidOrderId] = oo
 		self.nextValidOrderId += 1
 		self.placeOrder(self.nextValidOrderId, mktContract, order)
-		if self._orderEvent.wait(30):
+		if await self.event_wait(self._orderEvent, None):
 			self._orderEvent.clear()
 			oo.price = self.lastOrder.price
 			oo.status = 'success'
 			retval = oo
 		else:
-			log.error(f'Unable to place order {oo}')
+			log.error(f'Timed out when placing order: {oo.__dict__}')
 		return retval
 
 	def AfterHours(self):
@@ -340,60 +397,62 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		afterHours =  now.hour > 16 or now.hour < 9 or (now.hour == 9 and now.minute >= 30)
 		return afterHours
 
-	async def BuyAtmOptionsAtMarket(self, symbol, right, close, allocation, stop=None):
+	async def BuyAtmOptionsAtMarket(self, symbol, right, allocation, stop=None, trailStopPerc=None):
 		retval = None
-		self._authenticated.wait()
-		# TODO Log request
-		contracts = await self.GetOptionContractsAtmClosest(symbol, right, close)
-		for contract in contracts:
-			# Log contract
-			log.oper(f'ATM Contract found: {symbol}-{right}-{contract.lastTradeDateOrContractMonth}-{contract.strike} at {contract.price}')
-			quantity = trunc(allocation / (contract.price * 100))
-			oo = OptionOrder(symbol, right, 'BUY', contract.lastTradeDateOrContractMonth, contract.strike, allocation, quantity=quantity)
-			if quantity > 0:
-				self.orders[self.nextValidOrderId] = oo
-				self.nextValidOrderId += 1
-				order = None
-				timeout = None
-				if self.AfterHours():
-					order = self._createLimitOrder('BUY', quantity, contract.askPrice, afterHours=True)
-					timeout = 240
-				else:
-					order = self._createMarketOrder('BUY', quantity)
-					timeout = 120	 # Wait 2 minutes for a market buy
-				# TODO Log order
-				self.placeOrder(self.nextValidOrderId, contract, order)
-				# If a stop is specified, enter a stop market order
-				if (stop):
-					stopMarketOrder = Order()
-					stopMarketOrder.action = 'SELL'
-					stopMarketOrder.orderType = 'STP'
-					stopMarketOrder.auxPrice = (contract.price * (1 - stop))
-					stopMarketOrder.totalQuantity = quantity
-					stopMarketOrder.algoStrategy = 'Adaptive'
-					stopMarketOrder.algoParams = {'adaptivePriority': 'Normal'}
+		await self.event_wait(self._authenticated, None)
+		log.oper(f'Fetching market price for {symbol}')
+		close = await self.GetCurrentPrice(symbol)
+		if close:
+			log.oper(f'Looking for suitable contracts to buy {symbol}-{right} near {close}')
+			contracts = await self.GetOptionContractsAtmClosest(symbol, right, close)
+			for contract in contracts:
+				log.oper(f'Contract found: {symbol}-{right}-{contract.lastTradeDateOrContractMonth}-{contract.strike} at {contract.price}')
+				quantity = trunc(allocation / (contract.price * 100))
+				oo = OptionOrder(symbol, right, 'BUY', contract.lastTradeDateOrContractMonth, contract.strike, allocation, quantity=quantity)
+				if quantity > 0:
+					self.orders[self.nextValidOrderId] = oo
+					self.nextValidOrderId += 1
+					order = None
+					timeout = None
+					if self.AfterHours():
+						order = self._createLimitOrder('BUY', quantity, contract.askPrice, afterHours=True)
+						timeout = 240
+					else:
+						order = self._createMarketOrder('BUY', quantity)
+						timeout = 120	 # Wait 2 minutes for a market buy
+					# TODO Log order
 					self.placeOrder(self.nextValidOrderId, contract, order)
-				if self._orderEvent.wait(timeout):
-					self._orderEvent.clear()
-					oo.status = 'SUCCESS'
-					oo.quantity = quantity
-					oo.price = self.lastOrder.price
-					oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
-					retval = oo
+					# If a stop is specified, enter a stop market order
+					if stop:
+						# Place stoploss at market order with adaptive
+						stopOrder = self._createStopLossOrder('SELL', quantity, contract.price * (1-stop))
+						self.placeOrder(self.nextValidOrderId, contract, stopOrder)
+					if trailStopPerc:
+						trailOrder = self._createTrailStopOrder('SELL', quantity, trailStopPerc)
+						self.placeOrder(self.nextValidOrderId, contract, trailOrder)
+					if await self.event_wait(self._orderEvent, None):
+						self._orderEvent.clear()
+						oo.status = 'SUCCESS'
+						oo.quantity = quantity
+						oo.price = self.lastOrder.price
+						oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
+						retval = oo
+					else:
+						log.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
+					# We've placed an order, get out of loop
+					break
 				else:
-					log.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
-				# We've placed an order, get out of loop
-				break
-			else:
+					retval = oo
+					oo.price = 99999999
+					oo.status = 'INSUFFICIENT FUNDS'
+					log.error(f'Insufficient funds to purchase {symbol}-{right}-{oo.expiry}-{oo.strike} for ${contract.price}')
+			if len(contracts) <= 0:
 				retval = oo
 				oo.price = 99999999
-				oo.status = 'INSUFFICIENT FUNDS'
-				log.error(f'Insufficient funds to purchase {symbol}-{right}-{oo.expiry}-{oo.strike} for ${oo.price}')
-		if len(contracts) <= 0:
-			retval = oo
-			oo.price = 99999999
-			oo.status = 'NO OPTIONS FOUND'
-			log.error(f'No contracts found for {symbol}-{right}-{oo.expiry}-{oo.strike}')
+				oo.status = 'NO OPTIONS FOUND'
+				log.error(f'No contracts found for {symbol}-{right}-{oo.expiry}-{oo.strike}')
+		else:
+			log.error(f'Could not submit order, did not receive current market price for {symbol}')
 		return retval
 
 	def _roundTo(self, x, minIncrement):
@@ -403,7 +462,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	# Return them in nearest strike and expiry order
 	async def GetOptionContractsAtmClosest(self, symbol, right, close):
 		contracts = []
-		self._authenticated.wait()
+		await self.event_wait(self._authenticated, None)
 		today = datetime.now(pytz.timezone('America/New_York'))
 		dayOfWeek = today.weekday()  # 0 = Monday, 6 = Sunday
 		hourOfDay = today.hour  # What time zone is this in?  Local?
@@ -422,8 +481,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		targetDay = today
 		optionsConfig = optionsSymbols[symbol] if symbol in optionsSymbols else optionsSymbols['default']
 		if (optionsConfig['hasDailies']):
-			# TODO Get time zone to be time zone of exchange for ticker, too much craziness with local/exchange times
-			if hourOfDay >= 11:  # If after 1pm on 0DTE contracts, go to next contract just in case we have to hold to next day for algo
+			# Time is in timezone of exchange, NYSE usually
+			if hourOfDay > 13:  # If after 1pm on 0DTE contracts, go to next contract just in case we have to hold to next day for algo
 				if dayOfWeek == 4:
 					targetDay = today + timedelta(days=3)
 				elif dayOfWeek == 5:  # Saturday - go to monday
@@ -444,7 +503,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			elif dayOfWeek == 3:
 				targetDay = today + timedelta(days=1)
 			elif dayOfWeek == 4:
-				if hourOfDay > 10:  # If after 10am on Friday (0DTE), go to monday's contract
+				if hourOfDay > 13:  # If after 1pm on Friday (0DTE), go to monday's contract
 					targetDay = today + timedelta(days=3)
 			elif dayOfWeek == 5:  # Saturday - go to monday
 				targetDay = today + timedelta(days=2)
@@ -481,7 +540,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.marketDataRequestId += 1
 		waitingForTickInfo = True
 		while waitingForTickInfo:
-			if self.evTickPrice.wait(5):
+			if await self.event_wait(self.evTickPrice, 10):
 				self.evTickPrice.clear()
 				if reqId in self.tickInfo:
 					tickInfo = self.tickInfo[reqId]
@@ -503,8 +562,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			else:
 				# Timeout - probably bad ticker ID
 				waitingForTickInfo = False
-		# TODO Grab min tick setting and do this rounding correctly
-		contract.price = round(contract.price, 2) if (hasattr(contract, 'price') and contract.price > 0) else 9999999999.0
+		contract.price = contract.price if (hasattr(contract, 'price') and contract.price > 0) else 999999
 		return contract
 
 	async def GetOptionContractDetails(self, symbol, right, strike, targetDay):
@@ -514,14 +572,14 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		contractItm = self._createOptionContract(symbol, right, strike - 1, targetDay)
 
 		self.reqContractDetails(self.nextValidOrderId, contractItm)
-		self.evOptionContractDetails.wait()
+		await self.event_wait(self.evOptionContractDetails, 10)
 		self.evOptionContractDetails.clear()
-		if hasattr(self.optionContractDetails, 'ask'):
+		if self.optionContractDetails and hasattr(self.optionContractDetails, 'ask'):
 			contracts.append(self.optionContractDetails.ask)
 
 		self.reqContractDetails(self.nextValidOrderId, contractAtm)
-		self.evOptionContractDetails.wait()
+		await self.event_wait(self.evOptionContractDetails, 10)
 		self.evOptionContractDetails.clear()
-		if hasattr(self.optionContractDetails, 'ask'):
+		if self.optionContractDetails and hasattr(self.optionContractDetails, 'ask'):
 			contracts.append(self.optionContractDetails.ask)
 		return contracts

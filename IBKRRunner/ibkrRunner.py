@@ -70,15 +70,14 @@ async def onTradeSignal(signal):
 	type = signal['type'].upper()
 	right = signal['right'].upper()
 	side = signal['side'].upper()
-	close = signal['close']
 
 	tradedSymbolDef = await tradedSymbolsTbl.find_one({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type})
 	if (tradedSymbolDef):
 		allocation = tradedSymbolDef['allocation']
 		if side == 'BUY':
-			log.oper(f'Attempting to buy {symbol} {right} options ATM, close: {close} using allocation of ${allocation}')
+			log.oper(f'Attempting to buy {symbol} {right} options ATM, using allocation of ${allocation}')
 			# BuyMarket... is blocking but async, we have full info after it returns
-			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, close, allocation, stop=15)
+			order = await ibkrApi.BuyAtmOptionsAtMarket(symbol, right, allocation, stop=15)
 			if order and order.status == 'SUCCESS':
 				# Order has completed, let's record the order sepcifics from IBKR, then update our cash and positions
 				oo = OptionOrder(symbol, right, side, order.expiry, order.strike, allocation, order.quantity)
@@ -101,8 +100,10 @@ async def onTradeSignal(signal):
 					await positionsTbl.insert_one(positionFields)
 	
 				# Record the current cash allocation for this algo instance
-				allocation -= (order.quantity * order.price * 100)
-				await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': allocation}})
+				# Update allocation available if in pdt exempt mode, else leave allocation changes to the user
+				if 'pdtExempt' in tradedSymbolDef and tradedSymbolDef['pdtExempt']:
+					allocation -= (order.quantity * order.price * 100)
+					await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': allocation}})
 			else:
 				log.error(f'Failed to execute buy order for {symbol}:{right} with status: {order.status if order else "no order returned"}')
 
@@ -111,13 +112,14 @@ async def onTradeSignal(signal):
 			# There may have been different strikes/expiries opened and perhaps not closed due to order issues, clean them all up since
 			# we're getting a signal to sell.
 			anyMatchingPositions = False
-			log.oper(f'Attempting to sell {symbol} {right} options, close: {close} will add proceeds to  allocation of ${allocation}')
+			log.oper(f'Attempting to sell {symbol} {right} options')
 			async for position in positionsTbl.find({'symbol': symbol, 'algoId': algoId, 'timeframe': timeframe, 'type': type, 'right': right}):
 				anyMatchingPositions = True
 				if position and 'symbol' in position:
 					symbol = position['symbol']; algoId = position['algoId']; timeframe = position["timeframe"]; type = position['type']
 					right = position['right']; strike = position['strike']; expiry = position['expiry']; quantity = position['quantity']
 					if (quantity > 0):
+						log.oper(f'Found {symbol}-{right}-{expiry}-{strike} with quantity {quantity} to sell.')
 						# SellMarket is blocking but async, so we will have all order info on return
 						order = await ibkrApi.SellOptionsAtMarket(symbol, right, strike, expiry, quantity)
 						if order and order.status == 'SUCCESS':
@@ -141,15 +143,18 @@ async def onTradeSignal(signal):
 								cashProceeds = order.quantity * order.price * 100
 								await tradedSymbolsTbl.update_one({'_id': tradedSymbolDef['_id']}, {'$set': {'allocation': round(allocation + cashProceeds, 2)}})
 						else:
-							log.error(f'Failed to execute sell order for {symbol}:{right}')
+							log.error(f'No response for execute sell order for {symbol}-{right}-{expiry}-{strike}, probably still open.')
 					else:
-						log.error(f'Received sell signal for position with zero quantity {symbol}:{right}')
+						log.error(f'Found {symbol}-{right}-{expiry}-{strike} with zero quantity.  Nothing to sell.')
 				else:
-					log.error(f'Unable to find position for {symbol}:{right}')
+					log.error(f'Unable to find position for {symbol}-{algoId}-{timeframe}-{type}-{right}')
 			if not anyMatchingPositions:
-				log.error(f'Received sell alert for {symbol}:{algoId}:{timeframe}:{type}:{right} but there were no matching positions found.')
+				log.error(f'Received sell alert for {symbol}-{algoId}-{timeframe}-{type}-{right} but there were no matching positions found.')
 	else:
-		log.error(f"No trade symbol definition for {symbol}, {algoId}, {timeframe}, {type}")
+		log.error(f"No trade symbol definition for {symbol}-{algoId}-{timeframe}-{type}")
+
+async def UpdatePositionsFromBroker():
+      pass
 
 async def WatchAlgoSignalsCollection():
 	while True:
@@ -159,7 +164,7 @@ async def WatchAlgoSignalsCollection():
 					if 'fullDocument' in change:  # Only send updates on new rows being inserted
 						await onTradeSignal(change['fullDocument'])
 		except Exception as e:
-			log.error(f'WatchAlgoSignalsCollection threw exception {e}')
+			log.exception(f'WatchAlgoSignalsCollection threw exception {e}')
 
 def spinning_cursor():
 	while True:
@@ -180,6 +185,7 @@ async def main():
 			await asyncio.wait(waitables, timeout=1.0)
 			sys.stdout.write(next(spinner))
 			sys.stdout.flush()
+			# TODO - every minute or so, scan open positions on our broker and update our positions table
 		except Exception as e:
 			log.error(f'Something bad happened: {e}')
 
