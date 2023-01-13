@@ -176,7 +176,7 @@ async def main():
 	log.oper('Starting up TVBotRunner')
 	waitables = [asyncio.ensure_future(WatchAlgoSignalsCollection())]
 	# isLive True/False controls which port IBKRTradeApi will use
-	ibkrApi = await IBKRTradeApi.withInit(isLive = False)
+	ibkrApi = await IBKRTradeApi.withInit(isLive = True)
 	if ibkrApi:
 		log.oper('ENTERING MAIN LOOP')
 		while waitables:
