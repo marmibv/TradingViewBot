@@ -51,14 +51,12 @@ def onOrderUpdate(os):
 # Sample data returned from trade signal
 # {
 # 	"phrase": "CrispyBlueDuck",
-# 	"algo": "Bouncy",
-# 	"ticker": "QQQ",
+# 	"algo": "Tigger",
+# 	"ticker": "SPY",
 # 	"timeframe": "1m",
 # 	"type": "option",
 # 	"right": "call",
 # 	"side": "buy",
-# 	"strike": 272,
-# 	"close": 272.3,
 # 	"time": 123121111123,
 # 	"reason": "Long Wick"
 # }
@@ -177,17 +175,21 @@ async def main():
 	global ibkrApi
 	log.oper('Starting up TVBotRunner')
 	waitables = [asyncio.ensure_future(WatchAlgoSignalsCollection())]
-	ibkrApi = await IBKRTradeApi.withInit()
-	log.oper('ENTERING MAIN LOOP')
-	while waitables:
-		try:
-			sys.stdout.write('\b')
-			await asyncio.wait(waitables, timeout=1.0)
-			sys.stdout.write(next(spinner))
-			sys.stdout.flush()
-			# TODO - every minute or so, scan open positions on our broker and update our positions table
-		except Exception as e:
-			log.error(f'Something bad happened: {e}')
+	# isLive True/False controls which port IBKRTradeApi will use
+	ibkrApi = await IBKRTradeApi.withInit(isLive = False)
+	if ibkrApi:
+		log.oper('ENTERING MAIN LOOP')
+		while waitables:
+			try:
+				sys.stdout.write('\b')
+				await asyncio.wait(waitables, timeout=1.0)
+				sys.stdout.write(next(spinner))
+				sys.stdout.flush()
+				# TODO - every minute or so, scan open positions on our broker and update our positions table
+			except Exception as e:
+				log.error(f'Something bad happened: {e}')
+	else:
+		log.error(f'Could not create IBKR API, check that TWS or IBGateway are running and that IBKRApi is configured to connect to the correct port')
 
 if __name__ == "__main__":
 	try:

@@ -19,20 +19,25 @@ import logging
 
 log = logging.getLogger('MAIN')
 
+indexes = ['SPX', 'NDX', 'XSP', 'XND']
+
 class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
-	def __init__(self):
+	def __init__(self, isLive):
 		EClient.__init__(self, self)
 		self.subscribers = {}
 		self.orders = {}
 		self.ibkrOrders = {}
 		self.url = f"127.0.0.1"
+		self.port = 7496 if isLive else 7497
 		self._authenticated = asyncio.Event()
 		self._orderEvent = asyncio.Event()
+		self._errorEvent = asyncio.Event()
 		self.evOptionContractDetails = asyncio.Event()
 		self.evTickPrice = asyncio.Event()
 		self.task = None
 		self.marketDataRequestId = 1
 		self.tickInfo = {}
+		self.errors = []
 		# Tick Type definitions: 1 - Bid Price,  2 - Ask Price, 4 - Last Price,  6 - High of day, 7 - Low of day,  9 - Close of last day
 		self.tickIdLookup = {
 			'1': 'bid',
@@ -47,28 +52,46 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return self.task
 
 	@classmethod
-	async def withInit(cls):
-		self = cls()
-		await self.Startup()
-		return self
+	async def withInit(cls, isLive):
+		self = cls(isLive)
+		return self if  await self.Startup() else None
 
 	async def Startup(self):
 		self.disconnect()
-		await self.Connect()
-		self.task = threading.Thread(target=self.run, daemon=True)
-		self.task.start()
+		connected = await self.Connect()
+		if not connected:
+			log.error('Aborting IBKRApi startup, no TWS or IBGateway connection made')
+		return connected
 
 	async def Connect(self):
-		log.debug('Connecting to IBKR streaming...')
-		self.connect(self.url, 7496, int(random()*10000))
-		log.debug('Connected to IBKR streaming.')
-		await self._authenticate()
+		connected = False
+		log.oper('Connecting to IBKR streaming...')
+		self.connect(self.url, self.port, int(random()*10000))
+		if len(self.errors) <= 0:
+			self.task = threading.Thread(target=self.run, daemon=True)
+			self.task.start()
+			if await self.event_wait(self._authenticated, 10):
+				log.oper('Connected to IBKR streaming.')
+				connected = True
+			else:
+				log.error('FAILED TO AUTHENTICATE WITH TWS')
+		else:
+			log.error(f'FAILED TO CONNECT TO TWS on port {self.port}')
+		return connected
 
 	async def event_wait(self, evt, timeout):
 		# suppress TimeoutError because we'll return False in case of timeout
 		with contextlib.suppress(asyncio.TimeoutError):
 			await asyncio.wait_for(evt.wait(), timeout)
 		return evt.is_set()
+	
+	def error(self, id, errCode, errMsg, orderReject = None):
+		log.error(f'IBAPI Error: {id}, {errCode}, {errMsg}, {orderReject}')
+		error = {'id': id, 'errCode': errCode, 'errMsg': errMsg}
+		self.errors.append(error)
+		self._errorEvent.set()
+		# HACK - should just trigger error event and have people that care wait on either error or order events
+		self._orderEvent.set()
 
 	def Shutdown(self):
 		self.cancelAccountSummary()
@@ -104,7 +127,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	# Callback to receive a (partial) list of open orders
 	def openOrder(self, orderId: OrderId, contract: Contract, order: Order, orderState: OrderState):
 		super().openOrder(orderId, contract, order, orderState)
-		log.debug(f"OpenOrder. OrderId: {orderId}, Account: {order.account}, Symbol: {contract.symbol}")
+		log.debug(f"OpenOrder. OrderId: {orderId}, Symbol: {contract.symbol}")
 			# "SecType:", contract.secType,
 			#   "Exchange:", contract.exchange, "Action:", order.action, "OrderType:", order.orderType,
 			#   "TotalQty:", order.totalQuantity, "CashQty:", order.cashQty, 
@@ -174,12 +197,12 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.evOptionContractDetails.set()
 
 	async def SubscribeToTrades(self):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		log.debug(f'Subscribed to IBKR trades - NO-OP')
 		# Nothing to do, IBKR api is automatically subscribed to trade updates via EWrapper/EClient
 
 	async def UnsubscribeFromTrades(self):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		log.debug(f'Unsubscribed from IBKR trades - NO-OP')
 		# Nothing to do
 
@@ -187,7 +210,10 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		log.debug('Authenticating to IBKR local endpoint - NO-OP')
 		# Nothing to do here, IBKR authentication is handled external to this application, through the IB Gateway or the TWS client
 		# Local connection to the API gateway running on local machine is by whitelisted IP, no authentication required.
-		log.debug('Authenticated to IBKR streaming.')
+		if await self.event_wait(self._authenticated, 30):
+			log.debug('Authenticated to IBKR streaming.')
+		else:
+			log.error('Failed authentication with TWS or IBGateway')
 
 	def SubscribeTickerOrders(self, ticker, subscriber):
 		self.subscribers[ticker] = subscriber
@@ -213,7 +239,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return None
 
 	async def GetCurrentPositions(self):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		self.positions = []
 		try:
 			self.reqPositions()
@@ -222,11 +248,11 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return self.positions
 
 	async def GetCurrentPrice(self, symbol):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		contract = Contract()
 		contract.symbol = symbol
-		contract.secType = "STK"
-		contract.exchange = "SMART"
+		contract.secType = 'IND' if symbol in indexes else 'STK'
+		contract.exchange = 'CBOE' if symbol in indexes else 'SMART'
 		contract.currency = "USD"
 		self.reqMktData(self.marketDataRequestId,  contract, '', True, False, '')
 		reqId = f'{self.marketDataRequestId}'
@@ -240,25 +266,32 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 					contract.askPrice = tickInfo['ask'] if 'ask' in tickInfo else contract.askPrice if hasattr(contract, 'askPrice') else None
 					contract.bidPrice = tickInfo['bid'] if 'bid' in tickInfo else contract.bidPrice if hasattr(contract, 'bidPrice') else None
 					contract.lastPrice = tickInfo['last'] if 'last' in tickInfo else contract.lastPrice if hasattr(contract, 'lastPrice') else None
+					contract.closePrice = tickInfo['close'] if 'close' in tickInfo else contract.closePrice if hasattr(contract, 'closePrice') else None
+					# The best to have is the 'last' price, if we get that, we're done and we can return
+					# If we timeout without receiving the 'last', take 'ask' + 'bid' / 2 if we have both 'ask' and 'bid'
+					# else 
 					if 'last' in tickInfo:
-						contract.price = tickInfo['last']
+						contract.price = contract.lastPrice
+						waitingForTickInfo = False
+					elif 'close' in tickInfo:
+						contract.price = contract.closePrice
 						waitingForTickInfo = False
 					elif 'ask' and 'bid' in tickInfo:
-						contract.price = (tickInfo['ask'] + tickInfo['bid']) / 2
+						contract.price = (contract.askPrice + contract.bidPrice) / 2
 					elif 'ask' in tickInfo:
-						contract.price = tickInfo['ask']
+						contract.price = contract.askPrice
 					elif 'bid' in tickInfo:
-						contract.price = tickInfo['bid']
+						contract.price = contract.bidPrice
 					else:
 						# Got no useful price info, force 0 quantity by listing huge premium
 						contract.price = 9999999999
 			else:
 				# Timeout - probably bad ticker ID
 				waitingForTickInfo = False
-		return contract.price
+		return contract.price if hasattr(contract, 'price') else None
 
 	async def GetCurrentPositionFor(self, symbol):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		position = None
 		pss = self.GetCurrentPositions()
 		for ps in pss:
@@ -299,6 +332,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.totalQuantity = qty
 		order.orderType = 'LMT' if kind == 'limit' else 'MKT'
 		order.lmtPrice = price
+		order.lmtPriceOffset = 0
 		order.outsideRth = True
 		return order
 
@@ -349,6 +383,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		order.totalQuantity = qty
 		order.orderType = 'LMT'
 		order.lmtPrice = limit
+		order.lmtPriceOffset = 0
 		order.eTradeOnly = False
 		order.firmQuoteOnly = False
 		if not afterHours:
@@ -359,7 +394,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return order
 
 	async def PlaceStockOrder(self, oo):
-		await asyncio .wait_for(self._authenticated.wait(), None)
+		await self.event_wait(self._authenticated, None)
 		retval = None
 		contract = self._createForexContract(oo.symbol)
 		order = self._createOrder(oo.side, oo.price, oo.quantity, oo.kind)
@@ -383,11 +418,16 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.orders[self.nextValidOrderId] = oo
 		self.nextValidOrderId += 1
 		self.placeOrder(self.nextValidOrderId, mktContract, order)
-		if await self.event_wait(self._orderEvent, None):
+		if await self.event_wait(self._orderEvent, 10):
 			self._orderEvent.clear()
-			oo.price = self.lastOrder.price
-			oo.status = 'success'
-			retval = oo
+			self._errorEvent.clear()
+			if hasattr(self, 'lastOrder'):
+				oo.price = self.lastOrder.price
+				oo.status = 'success'
+				retval = oo
+			else:
+				log.error('Error ocurred while waiting for order to complete')
+				retval = None
 		else:
 			log.error(f'Timed out when placing order: {oo.__dict__}')
 		return retval
@@ -398,8 +438,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		return afterHours
 
 	async def BuyAtmOptionsAtMarket(self, symbol, right, allocation, stop=None, trailStopPerc=None):
-		retval = None
 		await self.event_wait(self._authenticated, None)
+		retval = None
 		log.oper(f'Fetching market price for {symbol}')
 		close = await self.GetCurrentPrice(symbol)
 		if close:
@@ -432,11 +472,15 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 						self.placeOrder(self.nextValidOrderId, contract, trailOrder)
 					if await self.event_wait(self._orderEvent, None):
 						self._orderEvent.clear()
-						oo.status = 'SUCCESS'
-						oo.quantity = quantity
-						oo.price = self.lastOrder.price
-						oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
-						retval = oo
+						self._errorEvent.clear()
+						if hasattr(self, 'lastOrder'):
+							oo.status = 'SUCCESS'
+							oo.quantity = quantity
+							oo.price = self.lastOrder.price
+							oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
+							retval = oo
+						else:
+							log.erro('Error submitting order')
 					else:
 						log.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
 					# We've placed an order, get out of loop
@@ -461,8 +505,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 	# Get a few options contracts ATM or ITM and closest expiry available
 	# Return them in nearest strike and expiry order
 	async def GetOptionContractsAtmClosest(self, symbol, right, close):
-		contracts = []
 		await self.event_wait(self._authenticated, None)
+		contracts = []
 		today = datetime.now(pytz.timezone('America/New_York'))
 		dayOfWeek = today.weekday()  # 0 = Monday, 6 = Sunday
 		hourOfDay = today.hour  # What time zone is this in?  Local?
