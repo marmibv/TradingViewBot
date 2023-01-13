@@ -504,6 +504,11 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 
 	# Get a few options contracts ATM or ITM and closest expiry available
 	# Return them in nearest strike and expiry order
+	# IBKR 0DTE Options Note:
+	#	IBKR refuses to honor 0DTE orders on contracts with a strike within .75 of current price (at least for SPY)
+	#	Their risk analysis says there is a good chance of carrying to expiration and getting exercised, requiring
+	#	significant margin to fill.  Hence they refuse the order.  So we have to make sure if we're 0DTE that
+	#	we are *AT LEAST* .75c from market price on the strike, otherwise the order will be rejected
 	async def GetOptionContractsAtmClosest(self, symbol, right, close):
 		await self.event_wait(self._authenticated, None)
 		contracts = []
@@ -522,54 +527,68 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 			'NDX': {'optionTick': 5, 'hasDailies': True, 'hasWeeklies': True},
 			'XND': {'optionTick': 1, 'hasDailies': True, 'hasWeeklies': True}
 		}
+		zeroDTE = True
 		targetDay = today
 		optionsConfig = optionsSymbols[symbol] if symbol in optionsSymbols else optionsSymbols['default']
 		if (optionsConfig['hasDailies']):
 			# Time is in timezone of exchange, NYSE usually
 			if hourOfDay > 13:  # If after 1pm on 0DTE contracts, go to next contract just in case we have to hold to next day for algo
 				if dayOfWeek == 4:
+					zeroDTE = False
 					targetDay = today + timedelta(days=3)
 				elif dayOfWeek == 5:  # Saturday - go to monday
+					zeroDTE = False
 					targetDay = today + timedelta(days=2)
 				elif dayOfWeek == 6:  # Sunday - go to monday
+					zeroDTE = False
 					targetDay = today + timedelta(days=1)
 				else:
+					zeroDTE = False
 					targetDay = today + timedelta(days=1)
 			else:
 				targetDay = today
 		elif (optionsConfig['hasWeeklies']):
 			if dayOfWeek == 0:
+				zeroDTE = False
 				targetDay = today + timedelta(days=4)
 			elif dayOfWeek == 1:
+				zeroDTE = False
 				targetDay = today + timedelta(days=3)
 			elif dayOfWeek == 2:
+				zeroDTE = False
 				targetDay = today + timedelta(days=2)
 			elif dayOfWeek == 3:
+				zeroDTE = False
 				targetDay = today + timedelta(days=1)
 			elif dayOfWeek == 4:
 				if hourOfDay > 13:  # If after 1pm on Friday (0DTE), go to monday's contract
+					zeroDTE = False
 					targetDay = today + timedelta(days=3)
 			elif dayOfWeek == 5:  # Saturday - go to monday
+				zeroDTE = False
 				targetDay = today + timedelta(days=2)
 			elif dayOfWeek == 6:  # Sunday - go to monday
+				zeroDTE = False
 				targetDay = today + timedelta(days=1)
 		else: # Monthlies only
 			log.debug('No weekly options avail, no trade')
 
 		strikeIncrement = optionsConfig['optionTick']
 		strike = self._roundTo(close, strikeIncrement)
+		if zeroDTE and abs(strike - close) < 0.75:
+			# We are within the range where IBKR will reject an option order for being too close to current price and hence might get exercised
+			# So adjust it away from strike by one strike increment
+			strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
+
+		# If XSP go first strike OTM, not ATM, the ATM and better options have crazy spreads on XSP close to end of day.
+		# First ATM put will be the result of the rounding, no need to subtract anything, calls need to go up one strikeIncrement
+		if symbol == 'XSP':
+			strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
 
 		# TODO - pull a few strikes, find the first one (up or down) that doesn't have a crazy spread, and has some bid/ask sizes
 		# sometimes we get raped on options that have a $1 or more spread.
 		# Or maybe just switch to 1DTE sometime around 2pm - that's when the 0DTEs seem to dry up.
   
-		# If XSP go first strike OTM, not ATM, the ATM and better options have crazy spreads on XSP close to end of day.
-		# First ATM put will be the result of the rounding, no need to subtract anything, calls need to go up one strikeIncrement
-		if symbol == 'XSP':
-			strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement
-		else:
-			strike = strike + strikeIncrement if right == 'CALL' else strike
-   
 		atmContract = await self.GetCurrentOptionPrice(symbol, right, strike, targetDay)
 		otmContract = await self.GetCurrentOptionPrice(symbol, right, strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement, targetDay)
 		contracts.append(atmContract)
