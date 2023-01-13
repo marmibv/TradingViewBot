@@ -480,7 +480,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 							oo.expiry = datetime.strptime(contract.lastTradeDateOrContractMonth, '%Y%m%d')
 							retval = oo
 						else:
-							log.erro('Error submitting order')
+							log.error('Error submitting order')
 					else:
 						log.error(f'Timed out trying to execute order {oo}, but did not cancel order.')
 					# We've placed an order, get out of loop
