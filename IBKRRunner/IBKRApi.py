@@ -575,7 +575,8 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 
 		strikeIncrement = optionsConfig['optionTick']
 		strike = self._roundTo(close, strikeIncrement)
-		if zeroDTE and abs(strike - close) < 0.75:
+		# TODO Make this a setting, or get a better idea on what calc IBKR uses to determine exercise risk and duplicate it here
+		if zeroDTE and abs(strike - close) < 0.85:
 			# We are within the range where IBKR will reject an option order for being too close to current price and hence might get exercised
 			# So adjust it away from strike by one strike increment
 			strike = strike + strikeIncrement if right == 'CALL' else strike - strikeIncrement

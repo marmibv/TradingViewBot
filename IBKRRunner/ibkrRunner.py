@@ -185,7 +185,9 @@ async def main():
 				await asyncio.wait(waitables, timeout=1.0)
 				sys.stdout.write(next(spinner))
 				sys.stdout.flush()
-				# TODO - every minute or so, scan open positions on our broker and update our positions table
+				# TODO - every 10s or so, scan open positions on our broker and update our positions table
+				#	Look for positions that are ready to have a trail stop implemented and send that
+				# TODO - every day, or maybe on startup, purge the positions table of 0 quantity positions
 			except Exception as e:
 				log.error(f'Something bad happened: {e}')
 	else:
