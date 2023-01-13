@@ -418,7 +418,7 @@ class IBKRTradeApi(StockAPI, TradePlatformApi, EWrapper, EClient):
 		self.orders[self.nextValidOrderId] = oo
 		self.nextValidOrderId += 1
 		self.placeOrder(self.nextValidOrderId, mktContract, order)
-		if await self.event_wait(self._orderEvent, 10):
+		if await self.event_wait(self._orderEvent, None):
 			self._orderEvent.clear()
 			self._errorEvent.clear()
 			if hasattr(self, 'lastOrder'):
